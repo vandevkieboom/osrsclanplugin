@@ -44,4 +44,7 @@ tasks.register('runClient', JavaExec) {
     description = 'Runs RuneLite with this plugin side-loaded'
     classpath = sourceSets.test.runtimeClasspath
     mainClass = 'com.timeserved.bingo.BingoPluginTest'
+    // RuneLite's ExternalPluginManager.loadBuiltin refuses to run without
+    // assertions enabled — it's a deliberate safety check for dev builds.
+    jvmArgs = ['-ea']
 }
