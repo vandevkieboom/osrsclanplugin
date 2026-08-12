@@ -11,9 +11,9 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import javax.imageio.ImageIO;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
@@ -72,12 +72,38 @@ public class BingoPlugin extends Plugin
 	private final Map<Integer, List<BoardResponse.Tile>> tilesByItemId = new ConcurrentHashMap<>();
 
 	/**
-	 * Tiles already submitted (or refused) this cycle, so a second matching drop
-	 * doesn't fire a duplicate upload before the board is refreshed. Cleared on
-	 * every successful refresh, at which point the server's own approved/pending
-	 * counts are authoritative again.
+	 * Tile id -> when it was last attempted (submitted or refused). This exists
+	 * purely to collapse the near-simultaneous duplicate: RuneLite's loot
+	 * tracker republishes most NPC kills as both NpcLootReceived and
+	 * LootReceived, so a single kill would otherwise be submitted twice.
+	 *
+	 * <p>Deliberately NOT a "don't retry this tile" flag with any longer
+	 * lifetime than that: if a submission gets rejected by an admin, a later
+	 * genuine re-drop of the same item must be able to try again. The server
+	 * is the actual authority on whether a tile still needs proof (it checks
+	 * approved+pending counts fresh on every request), so this cache only
+	 * needs to survive long enough to de-duplicate one kill's events, not
+	 * until the next board refresh.
 	 */
-	private final Set<String> claimedTiles = ConcurrentHashMap.newKeySet();
+	private final Map<String, Long> recentAttempts = new ConcurrentHashMap<>();
+	private static final long DEDUPE_WINDOW_MILLIS = TimeUnit.SECONDS.toMillis(30);
+
+	private boolean recentlyAttempted(String tileId)
+	{
+		long now = System.currentTimeMillis();
+		Long last = recentAttempts.putIfAbsent(tileId, now);
+		if (last == null)
+		{
+			return false;
+		}
+		if (now - last > DEDUPE_WINDOW_MILLIS)
+		{
+			// Stale — treat as a fresh attempt and reset the window.
+			recentAttempts.put(tileId, now);
+			return false;
+		}
+		return true;
+	}
 
 	@Provides
 	BingoConfig provideConfig(ConfigManager configManager)
@@ -95,7 +121,7 @@ public class BingoPlugin extends Plugin
 	protected void shutDown()
 	{
 		tilesByItemId.clear();
-		claimedTiles.clear();
+		recentAttempts.clear();
 	}
 
 	@Subscribe
@@ -132,7 +158,7 @@ public class BingoPlugin extends Plugin
 		if (apiKey.isEmpty())
 		{
 			tilesByItemId.clear();
-			claimedTiles.clear();
+			recentAttempts.clear();
 			return;
 		}
 
@@ -154,7 +180,6 @@ public class BingoPlugin extends Plugin
 
 				tilesByItemId.clear();
 				tilesByItemId.putAll(next);
-				claimedTiles.clear();
 				log.debug("Bingo board refreshed: watching {} item ids", next.size());
 			},
 			error -> log.debug("Bingo board refresh failed: {}", error));
@@ -198,7 +223,7 @@ public class BingoPlugin extends Plugin
 
 			for (BoardResponse.Tile tile : candidates)
 			{
-				if (!tile.needsMoreProof() || !claimedTiles.add(tile.tileId))
+				if (!tile.needsMoreProof() || recentlyAttempted(tile.tileId))
 				{
 					continue;
 				}
@@ -244,7 +269,7 @@ public class BingoPlugin extends Plugin
 		catch (IOException e)
 		{
 			log.warn("Failed to encode bingo screenshot", e);
-			claimedTiles.remove(tile.tileId);
+			recentAttempts.remove(tile.tileId);
 			notifyPlayer("Bingo: could not encode the screenshot for " + itemName);
 			return;
 		}
@@ -256,11 +281,13 @@ public class BingoPlugin extends Plugin
 			png,
 			() -> notifyPlayer("Bingo: submitted " + itemName + " for tile \"" + tile.name + "\""),
 			error -> {
-				// A transport failure is worth retrying on the next matching
-				// drop; a rejection from the server is not.
+				// A transport failure is worth retrying immediately on the next
+				// matching drop; a rejection from the server is not — but even
+				// then, the 30s window (not "forever") is what lets a genuine
+				// re-drop after a later admin rejection go through.
 				if ("Could not reach the clan site".equals(error))
 				{
-					claimedTiles.remove(tile.tileId);
+					recentAttempts.remove(tile.tileId);
 				}
 				notifyPlayer("Bingo: " + itemName + " not submitted — " + error);
 			});
