@@ -63,8 +63,8 @@ public interface BingoConfig extends Config
 
 	@ConfigItem(
 		keyName = "highlightGroundItems",
-		name = "Highlight bingo drops on the ground",
-		description = "Outline ground items that would satisfy one of your team's tiles.",
+		name = "Loot beam on bingo drops",
+		description = "Show a loot beam over ground items that would satisfy one of your team's tiles.",
 		section = overlaySection,
 		position = 5
 	)
@@ -76,8 +76,8 @@ public interface BingoConfig extends Config
 	@Alpha
 	@ConfigItem(
 		keyName = "groundItemHighlightColor",
-		name = "Highlight color",
-		description = "Color used to outline matching ground items.",
+		name = "Beam color",
+		description = "Color of the loot beam over matching ground items.",
 		section = overlaySection,
 		position = 6
 	)

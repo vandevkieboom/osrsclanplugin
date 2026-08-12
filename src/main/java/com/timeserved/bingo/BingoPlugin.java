@@ -122,7 +122,22 @@ public class BingoPlugin extends Plugin
 	private volatile String verificationCode = "";
 
 	/** Ground items currently visible whose id satisfies an outstanding tile. */
-	private final Map<TileItem, LocalPoint> trackedGroundItems = new ConcurrentHashMap<>();
+	private final Map<TileItem, TrackedGroundItem> trackedGroundItems = new ConcurrentHashMap<>();
+
+	/** A tracked ground item's real 3D loot beam, plus what to label it with. */
+	static class TrackedGroundItem
+	{
+		final LocalPoint location;
+		final String tileName;
+		final BingoLootbeam beam;
+
+		TrackedGroundItem(LocalPoint location, String tileName, BingoLootbeam beam)
+		{
+			this.location = location;
+			this.tileName = tileName;
+			this.beam = beam;
+		}
+	}
 
 	/** Screenshots that failed to upload over the network, waiting to retry. */
 	private final Deque<PendingSubmission> retryQueue = new ConcurrentLinkedDeque<>();
@@ -208,6 +223,10 @@ public class BingoPlugin extends Plugin
 		overlayManager.remove(verificationOverlay);
 		tilesByItemId.clear();
 		recentAttempts.clear();
+		for (TrackedGroundItem tracked : trackedGroundItems.values())
+		{
+			tracked.beam.remove();
+		}
 		trackedGroundItems.clear();
 		retryQueue.clear();
 		myTeamTiles = Collections.emptyList();
@@ -235,7 +254,7 @@ public class BingoPlugin extends Plugin
 		return verificationCode;
 	}
 
-	Map<TileItem, LocalPoint> getTrackedGroundItems()
+	Map<TileItem, TrackedGroundItem> getTrackedGroundItems()
 	{
 		return trackedGroundItems;
 	}
@@ -260,10 +279,16 @@ public class BingoPlugin extends Plugin
 
 	/**
 	 * Tiles get completed by teammates too, so the local copy goes stale on its
-	 * own even when this client sees no drops. Also drains the retry queue —
-	 * no need for a separate, faster schedule just for that.
+	 * own even when this client sees no drops — this is what keeps the panel
+	 * and the ground-item/overlay state reasonably close to live without
+	 * needing a push channel from the site. A minute is frequent enough to
+	 * feel responsive for a small clan's worth of traffic without hammering
+	 * the API; this player's own actions (see the refreshBoard() calls after
+	 * a successful submit/report below) update instantly regardless. Also
+	 * drains the retry queue — no need for a separate, faster schedule for
+	 * that.
 	 */
-	@Schedule(period = 5, unit = ChronoUnit.MINUTES, asynchronous = true)
+	@Schedule(period = 1, unit = ChronoUnit.MINUTES, asynchronous = true)
 	public void scheduledRefresh()
 	{
 		refreshBoard();
@@ -281,7 +306,7 @@ public class BingoPlugin extends Plugin
 			xpTilesBySkill = Collections.emptyMap();
 			kcTilesByBoss = Collections.emptyMap();
 			verificationCode = "";
-			panel.update(Collections.emptyList());
+			panel.update(Collections.emptyList(), 0);
 			return;
 		}
 
@@ -321,7 +346,7 @@ public class BingoPlugin extends Plugin
 				verificationCode = (board.config != null && board.config.verificationCode != null)
 					? board.config.verificationCode
 					: "";
-				panel.update(tiles);
+				panel.update(tiles, board.config == null ? 0 : board.config.size);
 				reportXpProgress(apiKey, nextXpTiles);
 				log.debug("Bingo board refreshed: watching {} item ids, {} xp tiles, {} kc tiles",
 					nextItemLookup.size(), nextXpTiles.size(), nextKcTiles.size());
@@ -352,6 +377,10 @@ public class BingoPlugin extends Plugin
 				}
 				long xp = client.getSkillExperience(skill);
 				BoardResponse.Tile tile = entry.getValue();
+				// No refreshBoard() on success here, unlike the kc report
+				// below — this call is itself made from inside
+				// refreshBoard()'s own callback, so that would recurse
+				// forever. The next scheduled refresh picks up the new total.
 				api.reportProgress(apiKey, "xp", tile.goalKey, xp,
 					() -> {},
 					error -> log.debug("Failed to report {} xp: {}", skill, error));
@@ -415,25 +444,43 @@ public class BingoPlugin extends Plugin
 		{
 			return;
 		}
+		// Unlike the xp report below, this one is safe to follow with a
+		// refresh: it's not itself running inside refreshBoard()'s callback,
+		// so there's no risk of looping — just an instant panel update the
+		// moment a tracked kill count ticks over.
 		api.reportProgress(apiKey, "kc", tile.goalKey, kc,
-			() -> {},
+			this::refreshBoard,
 			error -> log.debug("Failed to report {} kc: {}", tile.goalKey, error));
 	}
 
 	@Subscribe
 	public void onItemSpawned(ItemSpawned event)
 	{
-		if (!config.highlightGroundItems() || !tilesByItemId.containsKey(event.getItem().getId()))
+		if (!config.highlightGroundItems())
 		{
 			return;
 		}
-		trackedGroundItems.put(event.getItem(), event.getTile().getLocalLocation());
+		List<BoardResponse.Tile> candidates = tilesByItemId.get(event.getItem().getId());
+		if (candidates == null || candidates.isEmpty())
+		{
+			return;
+		}
+
+		BingoLootbeam beam = new BingoLootbeam(
+			client, clientThread, event.getTile().getWorldLocation(),
+			config.groundItemHighlightColor(), BingoLootbeam.Style.MODERN);
+		trackedGroundItems.put(event.getItem(),
+			new TrackedGroundItem(event.getTile().getLocalLocation(), candidates.get(0).name, beam));
 	}
 
 	@Subscribe
 	public void onItemDespawned(ItemDespawned event)
 	{
-		trackedGroundItems.remove(event.getItem());
+		TrackedGroundItem tracked = trackedGroundItems.remove(event.getItem());
+		if (tracked != null)
+		{
+			tracked.beam.remove();
+		}
 	}
 
 	@Subscribe
@@ -531,7 +578,10 @@ public class BingoPlugin extends Plugin
 			tile.tileId,
 			itemId,
 			png,
-			() -> notifyPlayer("Bingo: submitted " + itemName + " for tile \"" + tile.name + "\""),
+			() -> {
+				notifyPlayer("Bingo: submitted " + itemName + " for tile \"" + tile.name + "\"");
+				refreshBoard();
+			},
 			error -> {
 				// A transport failure is worth retrying — both immediately on
 				// the next matching drop (the 30s dedupe window, not "forever",
@@ -582,7 +632,10 @@ public class BingoPlugin extends Plugin
 			submission.tile.tileId,
 			submission.itemId,
 			submission.png,
-			() -> notifyPlayer("Bingo: submitted " + submission.itemName + " for tile \"" + submission.tile.name + "\""),
+			() -> {
+				notifyPlayer("Bingo: submitted " + submission.itemName + " for tile \"" + submission.tile.name + "\"");
+				refreshBoard();
+			},
 			error -> {
 				if ("Could not reach the clan site".equals(error))
 				{

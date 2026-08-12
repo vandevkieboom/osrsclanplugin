@@ -1,24 +1,22 @@
 package com.timeserved.bingo;
 
-import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.Graphics2D;
-import java.awt.Shape;
-import java.util.Map;
 import javax.inject.Inject;
 import net.runelite.api.Client;
 import net.runelite.api.Perspective;
-import net.runelite.api.TileItem;
-import net.runelite.api.coords.LocalPoint;
+import net.runelite.api.Point;
 import net.runelite.client.ui.overlay.Overlay;
 import net.runelite.client.ui.overlay.OverlayLayer;
 import net.runelite.client.ui.overlay.OverlayPosition;
 import net.runelite.client.ui.overlay.OverlayUtil;
 
 /**
- * Outlines ground items whose id still satisfies one of the player's team's
- * tiles — reuses {@link BingoPlugin}'s existing item-id-to-tile lookup, no
- * new data from the site needed.
+ * Labels ground items that still satisfy one of the player's team's tiles
+ * with the tile's name, so a beam is identifiable at a glance instead of
+ * just "something is highlighted here". The beam itself is a real 3D model
+ * (see {@link BingoLootbeam}, managed directly by {@link BingoPlugin} on
+ * item spawn/despawn) — this overlay only draws the text above it.
  */
 class BingoGroundItemsOverlay extends Overlay
 {
@@ -44,13 +42,12 @@ class BingoGroundItemsOverlay extends Overlay
 			return null;
 		}
 
-		Color color = config.groundItemHighlightColor();
-		for (Map.Entry<TileItem, LocalPoint> entry : plugin.getTrackedGroundItems().entrySet())
+		for (BingoPlugin.TrackedGroundItem tracked : plugin.getTrackedGroundItems().values())
 		{
-			Shape poly = Perspective.getCanvasTilePoly(client, entry.getValue());
-			if (poly != null)
+			Point textLocation = Perspective.getCanvasTextLocation(client, graphics, tracked.location, tracked.tileName, 40);
+			if (textLocation != null)
 			{
-				OverlayUtil.renderPolygon(graphics, poly, color);
+				OverlayUtil.renderTextLocation(graphics, textLocation, tracked.tileName, config.groundItemHighlightColor());
 			}
 		}
 		return null;

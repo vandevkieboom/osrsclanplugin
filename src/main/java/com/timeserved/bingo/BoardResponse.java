@@ -22,6 +22,9 @@ public class BoardResponse
 	/** Only the fields this plugin reads out of the board's event config. */
 	public static class Config
 	{
+		/** The board is always size x size — needed to lay out the panel's grid to match. */
+		public int size;
+
 		/**
 		 * Anti-cheat watermark for manually-taken screenshots — only present
 		 * when this request was authenticated (see getRequestUser in
@@ -67,6 +70,10 @@ public class BoardResponse
 	public static class Tile
 	{
 		public String tileId;
+
+		/** This tile's slot on the size x size board — 0-indexed, row-major. */
+		public int position;
+
 		public String name;
 		public int requiredCount;
 		public int approvedCount;
