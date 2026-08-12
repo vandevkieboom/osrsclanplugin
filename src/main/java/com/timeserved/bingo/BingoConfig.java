@@ -1,5 +1,7 @@
 package com.timeserved.bingo;
 
+import java.awt.Color;
+import net.runelite.client.config.Alpha;
 import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
 import net.runelite.client.config.ConfigItem;
@@ -48,6 +50,51 @@ public interface BingoConfig extends Config
 		position = 3
 	)
 	default boolean notifyOnSubmit()
+	{
+		return true;
+	}
+
+	@ConfigSection(
+		name = "Overlays",
+		description = "On-screen highlights and the event verification watermark",
+		position = 4
+	)
+	String overlaySection = "overlays";
+
+	@ConfigItem(
+		keyName = "highlightGroundItems",
+		name = "Highlight bingo drops on the ground",
+		description = "Outline ground items that would satisfy one of your team's tiles.",
+		section = overlaySection,
+		position = 5
+	)
+	default boolean highlightGroundItems()
+	{
+		return true;
+	}
+
+	@Alpha
+	@ConfigItem(
+		keyName = "groundItemHighlightColor",
+		name = "Highlight color",
+		description = "Color used to outline matching ground items.",
+		section = overlaySection,
+		position = 6
+	)
+	default Color groundItemHighlightColor()
+	{
+		return new Color(255, 215, 0, 180);
+	}
+
+	@ConfigItem(
+		keyName = "showVerificationOverlay",
+		name = "Show verification watermark",
+		description = "Show the event's codephrase and a live timestamp on-screen, so a manually-taken"
+			+ " screenshot can be tied to the live event.",
+		section = overlaySection,
+		position = 7
+	)
+	default boolean showVerificationOverlay()
 	{
 		return true;
 	}

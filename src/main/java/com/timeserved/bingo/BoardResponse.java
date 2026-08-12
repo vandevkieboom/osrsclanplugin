@@ -17,6 +17,18 @@ public class BoardResponse
 {
 	public String myTeamId;
 	public List<Team> teams;
+	public Config config;
+
+	/** Only the fields this plugin reads out of the board's event config. */
+	public static class Config
+	{
+		/**
+		 * Anti-cheat watermark for manually-taken screenshots — only present
+		 * when this request was authenticated (see getRequestUser in
+		 * api/board.ts), which a plugin request always is once a key is set.
+		 */
+		public String verificationCode;
+	}
 
 	public List<Team> getTeams()
 	{
@@ -61,16 +73,45 @@ public class BoardResponse
 		public int pendingCount;
 		public List<Integer> itemIds;
 
+		/**
+		 * "item" (the default) is the proof/review tile this plugin has always
+		 * handled; "xp"/"kc" is a team-combined total this plugin reports
+		 * readings toward directly (see {@link BingoApiClient#reportProgress})
+		 * — those tiles are never in {@code itemIds} and never take a
+		 * screenshot, they're just watched and reported.
+		 */
+		public String goalKind;
+
+		/** The skill or boss name to watch, exactly as the server has it configured. */
+		public String goalKey;
+
+		/** XP/kill-count threshold for the team total; null for item tiles. */
+		public Long goalTarget;
+
+		/** Server-computed team total so far; null for item tiles. */
+		public Long teamProgress;
+
 		public List<Integer> getItemIds()
 		{
 			return itemIds == null ? Collections.emptyList() : itemIds;
+		}
+
+		public boolean isXpGoal()
+		{
+			return "xp".equals(goalKind);
+		}
+
+		public boolean isKcGoal()
+		{
+			return "kc".equals(goalKind);
 		}
 
 		/**
 		 * Whether this tile still has room for another proof. Mirrors the
 		 * server's own rule (api/_lib/board.ts): approved and pending proofs
 		 * both count towards the requirement, so a tile awaiting review isn't
-		 * submitted again.
+		 * submitted again. Only meaningful for item tiles — xp/kc tiles have
+		 * no proofs at all.
 		 */
 		public boolean needsMoreProof()
 		{
