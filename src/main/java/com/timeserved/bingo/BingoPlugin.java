@@ -2,6 +2,8 @@ package com.timeserved.bingo;
 
 import com.google.inject.Provides;
 import java.awt.Color;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -23,6 +25,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.imageio.ImageIO;
 import javax.inject.Inject;
+import javax.swing.SwingUtilities;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
@@ -49,7 +52,9 @@ import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.loottracker.LootReceived;
 import net.runelite.client.task.Schedule;
+import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.DrawManager;
+import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.ui.overlay.OverlayManager;
 import net.runelite.client.util.ColorUtil;
 import net.runelite.client.util.ImageUtil;
@@ -96,6 +101,14 @@ public class BingoPlugin extends Plugin
 
 	@Inject
 	private ConfigManager configManager;
+
+	@Inject
+	private ClientToolbar clientToolbar;
+
+	@Inject
+	private BingoPanel bingoPanel;
+
+	private NavigationButton bingoNavButton;
 
 	/**
 	 * Runs the site's "Auto-Verify" rank check for the given name. "!verify
@@ -228,7 +241,43 @@ public class BingoPlugin extends Plugin
 		chatCommandManager.registerCommandAsync(VERIFY_COMMAND, this::onRankCommand);
 		chatCommandManager.registerCommandAsync(NEEDED_COMMAND, this::onNeededCommand);
 		chatCommandManager.registerCommandAsync(LIVE_COMMAND, this::onLiveCommand);
+
+		bingoNavButton = NavigationButton.builder()
+			.tooltip("Bingo")
+			.icon(buildNavIcon())
+			.priority(5)
+			.panel(bingoPanel)
+			.build();
+		clientToolbar.addNavigation(bingoNavButton);
+
 		refreshBoard();
+	}
+
+	/**
+	 * A plain drawn icon rather than a bundled PNG resource: three small squares on the sidebar rail,
+	 * echoing a bingo tile without needing an image asset shipped alongside the plugin.
+	 */
+	private static BufferedImage buildNavIcon()
+	{
+		BufferedImage icon = new BufferedImage(16, 16, BufferedImage.TYPE_INT_ARGB);
+		Graphics2D g = icon.createGraphics();
+		g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+		g.setColor(new Color(220, 138, 0));
+		int cell = 4;
+		int gap = 2;
+		for (int row = 0; row < 3; row++)
+		{
+			for (int col = 0; col < 3; col++)
+			{
+				if (row == 1 && col == 1)
+				{
+					continue;
+				}
+				g.fillRect(1 + col * (cell + gap), 1 + row * (cell + gap), cell, cell);
+			}
+		}
+		g.dispose();
+		return icon;
 	}
 
 	@Override
@@ -238,6 +287,8 @@ public class BingoPlugin extends Plugin
 		chatCommandManager.unregisterCommand(VERIFY_COMMAND);
 		chatCommandManager.unregisterCommand(NEEDED_COMMAND);
 		chatCommandManager.unregisterCommand(LIVE_COMMAND);
+		clientToolbar.removeNavigation(bingoNavButton);
+		bingoPanel.dispose();
 		tilesByItemId.clear();
 		recentAttempts.clear();
 		for (TrackedGroundItem tracked : trackedGroundItems.values())
@@ -305,12 +356,15 @@ public class BingoPlugin extends Plugin
 			recentAttempts.clear();
 			xpTilesBySkill = Collections.emptyMap();
 			kcTilesByBoss = Collections.emptyMap();
+			SwingUtilities.invokeLater(bingoPanel::showNoApiKey);
 			return;
 		}
 
 		api.fetchBoard(
 			apiKey,
 			board -> {
+				SwingUtilities.invokeLater(() -> bingoPanel.refresh(board));
+
 				BoardResponse.Team myTeam = board.findMyTeam();
 				List<BoardResponse.Tile> tiles = myTeam == null ? Collections.emptyList() : myTeam.getTiles();
 
@@ -616,7 +670,7 @@ public class BingoPlugin extends Plugin
 			tile.tileId,
 			itemId,
 			png,
-			() -> onSubmitted("Submitted " +itemName + " for tile \"" + tile.name + "\""),
+			() -> onSubmitted(itemName, tile.name),
 			error -> {
 				// A transport failure is worth retrying — both immediately on
 				// the next matching drop (the 30s dedupe window, not "forever",
@@ -667,7 +721,7 @@ public class BingoPlugin extends Plugin
 			submission.tile.tileId,
 			submission.itemId,
 			submission.png,
-			() -> onSubmitted("Submitted " +submission.itemName + " for tile \"" + submission.tile.name + "\""),
+			() -> onSubmitted(submission.itemName, submission.tile.name),
 			error -> {
 				if ("Could not reach the clan site".equals(error))
 				{
@@ -680,10 +734,14 @@ public class BingoPlugin extends Plugin
 			});
 	}
 
-	/** Common success path for a real proof landing: chat message plus a refresh. */
-	private void onSubmitted(String message)
+	/**
+	 * Common success path for a real proof landing: chat message, a note to the sidebar panel (so its
+	 * toast can show the same confirmation without needing to be watching chat), plus a refresh.
+	 */
+	private void onSubmitted(String itemName, String tileName)
 	{
-		notifyPlayer(message);
+		notifyPlayer("Submitted " + itemName + " for tile \"" + tileName + "\"");
+		bingoPanel.notifyAutoSubmitted(itemName);
 		refreshBoard();
 	}
 

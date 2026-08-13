@@ -16,6 +16,7 @@ import java.util.List;
 public class BoardResponse
 {
 	public String myTeamId;
+	public Config config;
 	public List<Team> teams;
 
 	public List<Team> getTeams()
@@ -40,10 +41,23 @@ public class BoardResponse
 		return null;
 	}
 
+	/** The bingo event's own name/size — used for the sidebar panel's header, nothing else needed it before. */
+	public static class Config
+	{
+		public String name;
+		public int size;
+	}
+
 	public static class Team
 	{
 		public String id;
 		public String name;
+		/** Hex string like "#e8574a"; null falls back to a neutral colour. */
+		public String accentColor;
+		public int completeCount;
+		public int totalTiles;
+		public int pct;
+		public boolean isLeading;
 		public List<Tile> tiles;
 
 		public List<Tile> getTiles()
@@ -55,10 +69,14 @@ public class BoardResponse
 	public static class Tile
 	{
 		public String tileId;
+		public int position;
 		public String name;
+		public String iconUrl;
 		public int requiredCount;
 		public int approvedCount;
 		public int pendingCount;
+		/** "approved" | "pending" | "rejected" | "none" — server-computed, mirrors the website's own status. */
+		public String status;
 		public List<Integer> itemIds;
 
 		/**
