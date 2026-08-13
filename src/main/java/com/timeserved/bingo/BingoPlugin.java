@@ -23,6 +23,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.imageio.ImageIO;
 import javax.inject.Inject;
+import javax.swing.SwingUtilities;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
@@ -49,7 +50,9 @@ import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.loottracker.LootReceived;
 import net.runelite.client.task.Schedule;
+import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.DrawManager;
+import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.ui.overlay.OverlayManager;
 import net.runelite.client.util.ColorUtil;
 import net.runelite.client.util.ImageUtil;
@@ -96,6 +99,14 @@ public class BingoPlugin extends Plugin
 
 	@Inject
 	private ConfigManager configManager;
+
+	@Inject
+	private ClientToolbar clientToolbar;
+
+	@Inject
+	private LfgPanel lfgPanel;
+
+	private NavigationButton lfgNavButton;
 
 	/**
 	 * Runs the site's "Auto-Verify" rank check for the given name. "!verify
@@ -228,7 +239,18 @@ public class BingoPlugin extends Plugin
 		chatCommandManager.registerCommandAsync(VERIFY_COMMAND, this::onRankCommand);
 		chatCommandManager.registerCommandAsync(NEEDED_COMMAND, this::onNeededCommand);
 		chatCommandManager.registerCommandAsync(LIVE_COMMAND, this::onLiveCommand);
+
+		BufferedImage lfgIcon = ImageUtil.loadImageResource(getClass(), "/com/timeserved/bingo/lfg_icon.png");
+		lfgNavButton = NavigationButton.builder()
+			.tooltip("LFG")
+			.icon(lfgIcon)
+			.priority(5)
+			.panel(lfgPanel)
+			.build();
+		clientToolbar.addNavigation(lfgNavButton);
+
 		refreshBoard();
+		refreshLfg();
 	}
 
 	@Override
@@ -238,6 +260,7 @@ public class BingoPlugin extends Plugin
 		chatCommandManager.unregisterCommand(VERIFY_COMMAND);
 		chatCommandManager.unregisterCommand(NEEDED_COMMAND);
 		chatCommandManager.unregisterCommand(LIVE_COMMAND);
+		clientToolbar.removeNavigation(lfgNavButton);
 		tilesByItemId.clear();
 		recentAttempts.clear();
 		for (TrackedGroundItem tracked : trackedGroundItems.values())
@@ -294,6 +317,26 @@ public class BingoPlugin extends Plugin
 		retryPendingSubmissions();
 		checkLiveStreams();
 		checkBroadcast();
+		refreshLfg();
+	}
+
+	/**
+	 * Refreshes the LFG panel's list. Unlike the bingo board (which still
+	 * shows something useful with no key), the LFG board is entirely
+	 * plugin-key-gated, so an empty key just clears the panel instead of
+	 * calling out to the site.
+	 */
+	private void refreshLfg()
+	{
+		String apiKey = config.apiKey().trim();
+		if (apiKey.isEmpty())
+		{
+			SwingUtilities.invokeLater(() -> lfgPanel.refresh(Collections.emptyList()));
+			return;
+		}
+		api.fetchLfgPosts(apiKey,
+			posts -> SwingUtilities.invokeLater(() -> lfgPanel.refresh(posts)),
+			error -> log.debug("LFG refresh failed: {}", error));
 	}
 
 	private void refreshBoard()
