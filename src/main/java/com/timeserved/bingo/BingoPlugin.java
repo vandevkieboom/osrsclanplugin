@@ -1,6 +1,7 @@
 package com.timeserved.bingo;
 
 import com.google.inject.Provides;
+import java.awt.Color;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -10,6 +11,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -25,6 +27,7 @@ import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.ChatMessageType;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
+import net.runelite.api.MessageNode;
 import net.runelite.api.Player;
 import net.runelite.api.Skill;
 import net.runelite.api.TileItem;
@@ -50,12 +53,14 @@ import net.runelite.client.ui.DrawManager;
 import net.runelite.client.ui.overlay.OverlayManager;
 import net.runelite.client.util.ColorUtil;
 import net.runelite.client.util.ImageUtil;
+import net.runelite.client.util.Text;
 
 @Slf4j
 @PluginDescriptor(
-	name = "Time Served Bingo",
-	description = "Auto-submits bingo tile proofs to the Time Served clan site when you get a matching drop",
-	tags = {"bingo", "clan", "loot", "screenshot", "event"}
+	name = "Time Served",
+	description = "Tools for the Time Served clan: auto-submits bingo tile proofs when you get a matching drop,"
+		+ " and adds a \"!verify <name>\" chat command to check a clan member's rank eligibility.",
+	tags = {"bingo", "clan", "loot", "screenshot", "event", "verify", "rank"}
 )
 public class BingoPlugin extends Plugin
 {
@@ -87,18 +92,41 @@ public class BingoPlugin extends Plugin
 	private BingoGroundItemsOverlay groundItemsOverlay;
 
 	@Inject
-	private BingoVerificationOverlay verificationOverlay;
-
-	@Inject
 	private ChatCommandManager chatCommandManager;
 
+	@Inject
+	private ConfigManager configManager;
+
 	/**
-	 * Runs the site's "Auto-Verify" rank check for the given name — same as
-	 * "!lvl" and RuneLite's other bundled chat commands, typing this in any
-	 * chat channel sends it for real (it's not a silent local-only input),
-	 * so the query itself is visible to whoever else is in that channel.
+	 * Runs the site's "Auto-Verify" rank check for the given name. "!verify
+	 * <name>" really is sent as a normal chat message, same as "!lvl" or
+	 * "!kc" — visible to everyone nearby, plugin or not. The looked-up
+	 * result then overwrites that message's displayed text (see
+	 * setChatReply below), the exact technique RuneLite's own bundled chat
+	 * commands use, which only ever affects local rendering: it shows up
+	 * for other viewers whose own client also has this command registered
+	 * (i.e. other Time Served Bingo plugin users), while anyone else just
+	 * sees the plain, unmodified "!verify <name>" they actually typed.
 	 */
-	private static final String RANK_COMMAND = "!rank";
+	private static final String VERIFY_COMMAND = "!verify";
+
+	/** Same visible-reply mechanism as !verify — see setChatReply. */
+	private static final String NEEDED_COMMAND = "!needed";
+
+	/** Same visible-reply mechanism as !verify — see setChatReply. */
+	private static final String LIVE_COMMAND = "!live";
+
+	/**
+	 * Twitch usernames seen live on the last background check, so "Notify me
+	 * when clan members go live" only announces new arrivals rather than
+	 * re-announcing everyone who was already live on every check. Null until
+	 * the first check completes, which seeds this silently instead of
+	 * announcing everyone already live at plugin startup as "new".
+	 */
+	private volatile Set<String> previouslyLiveUsernames;
+
+	/** Sync-reminder fires at most once per plugin session, on whichever outcome comes back first. */
+	private boolean checkedRuneProfileSync;
 
 	/**
 	 * Item id -> the tiles it can satisfy, for this player's own team only.
@@ -197,8 +225,9 @@ public class BingoPlugin extends Plugin
 	protected void startUp()
 	{
 		overlayManager.add(groundItemsOverlay);
-		overlayManager.add(verificationOverlay);
-		chatCommandManager.registerCommandAsync(RANK_COMMAND, this::onRankCommand);
+		chatCommandManager.registerCommandAsync(VERIFY_COMMAND, this::onRankCommand);
+		chatCommandManager.registerCommandAsync(NEEDED_COMMAND, this::onNeededCommand);
+		chatCommandManager.registerCommandAsync(LIVE_COMMAND, this::onLiveCommand);
 		refreshBoard();
 	}
 
@@ -206,8 +235,9 @@ public class BingoPlugin extends Plugin
 	protected void shutDown()
 	{
 		overlayManager.remove(groundItemsOverlay);
-		overlayManager.remove(verificationOverlay);
-		chatCommandManager.unregisterCommand(RANK_COMMAND);
+		chatCommandManager.unregisterCommand(VERIFY_COMMAND);
+		chatCommandManager.unregisterCommand(NEEDED_COMMAND);
+		chatCommandManager.unregisterCommand(LIVE_COMMAND);
 		tilesByItemId.clear();
 		recentAttempts.clear();
 		for (TrackedGroundItem tracked : trackedGroundItems.values())
@@ -219,6 +249,8 @@ public class BingoPlugin extends Plugin
 		warnedUnrecognisedSkills.clear();
 		xpTilesBySkill = Collections.emptyMap();
 		kcTilesByBoss = Collections.emptyMap();
+		previouslyLiveUsernames = null;
+		checkedRuneProfileSync = false;
 	}
 
 	Map<TileItem, TrackedGroundItem> getTrackedGroundItems()
@@ -232,6 +264,8 @@ public class BingoPlugin extends Plugin
 		if (event.getGameState() == GameState.LOGGED_IN)
 		{
 			refreshBoard();
+			checkRuneProfileSync();
+			checkBroadcast();
 		}
 	}
 
@@ -258,6 +292,8 @@ public class BingoPlugin extends Plugin
 	{
 		refreshBoard();
 		retryPendingSubmissions();
+		checkLiveStreams();
+		checkBroadcast();
 	}
 
 	private void refreshBoard()
@@ -392,7 +428,7 @@ public class BingoPlugin extends Plugin
 		{
 			if (warnedUnrecognisedSkills.add(normalized))
 			{
-				notifyPlayer("Bingo: \"" + name + "\" on your team's board isn't a real skill name — ask an admin to fix that tile.");
+				notifyPlayer("\"" + name + "\" on your team's board isn't a real skill name — ask an admin to fix that tile.");
 			}
 			return null;
 		}
@@ -570,7 +606,7 @@ public class BingoPlugin extends Plugin
 		{
 			log.warn("Failed to encode bingo screenshot", e);
 			recentAttempts.remove(tile.tileId);
-			notifyPlayer("Bingo: could not encode the screenshot for " + itemName);
+			notifyPlayer("Could not encode the screenshot for " + itemName);
 			return;
 		}
 
@@ -580,7 +616,7 @@ public class BingoPlugin extends Plugin
 			tile.tileId,
 			itemId,
 			png,
-			() -> onSubmitted("Bingo: submitted " + itemName + " for tile \"" + tile.name + "\""),
+			() -> onSubmitted("Submitted " +itemName + " for tile \"" + tile.name + "\""),
 			error -> {
 				// A transport failure is worth retrying — both immediately on
 				// the next matching drop (the 30s dedupe window, not "forever",
@@ -592,7 +628,7 @@ public class BingoPlugin extends Plugin
 					recentAttempts.remove(tile.tileId);
 					enqueueRetry(submission);
 				}
-				notifyPlayer("Bingo: " + itemName + " not submitted — " + error);
+				notifyPlayer(itemName + " not submitted — " + error);
 			});
 	}
 
@@ -631,7 +667,7 @@ public class BingoPlugin extends Plugin
 			submission.tile.tileId,
 			submission.itemId,
 			submission.png,
-			() -> onSubmitted("Bingo: submitted " + submission.itemName + " for tile \"" + submission.tile.name + "\""),
+			() -> onSubmitted("Submitted " +submission.itemName + " for tile \"" + submission.tile.name + "\""),
 			error -> {
 				if ("Could not reach the clan site".equals(error))
 				{
@@ -639,7 +675,7 @@ public class BingoPlugin extends Plugin
 				}
 				else
 				{
-					notifyPlayer("Bingo: " + submission.itemName + " not submitted — " + error);
+					notifyPlayer(submission.itemName + " not submitted — " + error);
 				}
 			});
 	}
@@ -684,55 +720,278 @@ public class BingoPlugin extends Plugin
 		{
 			return;
 		}
-		sendChatMessage(message);
+		sendChatMessage(message, config.submitMessageColor());
 	}
 
 	/**
-	 * The !rank command below always shows its result, regardless of the
-	 * "Chat message on submit" toggle — that setting is specifically about
-	 * drop-submission notifications, not a command the player just typed.
+	 * The clan commands (!verify, !needed, !live, the sync reminder) always
+	 * show their result regardless of the "Chat message on submit" toggle —
+	 * that setting is specifically about drop-submission notifications, not
+	 * a command the player just typed — which is also why they pass their
+	 * own clanMessageColor() here rather than sharing submitMessageColor: a
+	 * bingo drop notification and a clan command reply aren't the same kind
+	 * of message, so one color config shouldn't govern both.
 	 */
-	private void sendChatMessage(String message)
+	private void sendChatMessage(String message, Color color)
 	{
-		String colored = ColorUtil.wrapWithColorTag(message, config.submitMessageColor());
+		String colored = ColorUtil.wrapWithColorTag(message, color);
 		clientThread.invokeLater(() -> client.addChatMessage(ChatMessageType.CONSOLE, "", colored, null));
 	}
 
 	/**
-	 * Handles "!rank <name>", run off the client thread already (see
-	 * registerCommandAsync above) so the network call here doesn't need its
-	 * own thread-hop. Only ever reports what rank the account qualifies for
-	 * — there's no way to actually apply an in-game clan rank from here.
+	 * Handles "!verify [name]" once it's actually been sent (this is
+	 * registerCommandAsync's execute callback, run off the client thread
+	 * already). No name defaults to the sender — chatMessage.getName() is
+	 * this message's own author for a real sent message, so no client-thread
+	 * hop is needed to read it the way client.getLocalPlayer() would require.
+	 * A usage mistake only gets a private reply — nothing worth other
+	 * viewers seeing — but a real lookup result or failure rewrites the sent
+	 * message itself via setChatReply, same as !lvl/!kc. No plugin key
+	 * needed: this is a clan-wide feature, not a bingo one.
 	 */
 	private void onRankCommand(ChatMessage chatMessage, String message)
 	{
-		String rsn = message.length() > RANK_COMMAND.length()
-			? message.substring(RANK_COMMAND.length()).trim()
-			: "";
+		String rsn = commandArgument(message, VERIFY_COMMAND, chatMessage);
 		if (rsn.isEmpty())
 		{
-			sendChatMessage("Bingo: usage - " + RANK_COMMAND + " <name>");
+			sendChatMessage("Usage - " + VERIFY_COMMAND + " [name]", config.clanMessageColor());
 			return;
 		}
 
-		String apiKey = config.apiKey().trim();
-		if (apiKey.isEmpty())
+		api.lookupRank(rsn,
+			result -> setChatReply(chatMessage, formatRankResult(result)),
+			(error, reason) -> setChatReply(chatMessage, describeRankError(rsn, error, reason)));
+	}
+
+	/**
+	 * Handles "!needed [name]" — same shape as !verify (real sent message,
+	 * self by default, rewritten in place with the result), just reporting
+	 * what's missing for the next rank tier instead of the current one.
+	 * Kept as its own command rather than folded into !verify's reply so
+	 * that reply can stay a single short line.
+	 */
+	private void onNeededCommand(ChatMessage chatMessage, String message)
+	{
+		String rsn = commandArgument(message, NEEDED_COMMAND, chatMessage);
+		if (rsn.isEmpty())
 		{
-			sendChatMessage("Bingo: set your plugin key in the config first.");
+			sendChatMessage("Usage - " + NEEDED_COMMAND + " [name]", config.clanMessageColor());
 			return;
 		}
 
-		api.lookupRank(apiKey, rsn,
-			result -> sendChatMessage(formatRankResult(result)),
-			error -> sendChatMessage("Bingo: rank lookup for " + rsn + " failed - " + error));
+		api.lookupRank(rsn,
+			result -> setChatReply(chatMessage, formatNeededResult(result)),
+			(error, reason) -> setChatReply(chatMessage, describeRankError(rsn, error, reason)));
+	}
+
+	/**
+	 * Handles "!live" the same way as !verify: a real sent message that
+	 * setChatReply then overwrites with the result. Needs no plugin key —
+	 * live status is public site data, same as the site's own homepage.
+	 */
+	private void onLiveCommand(ChatMessage chatMessage, String message)
+	{
+		api.fetchLiveStreams(
+			streams -> setChatReply(chatMessage, formatLiveStreams(streams)),
+			error -> setChatReply(chatMessage, error));
+	}
+
+	/** The bit after the command word, or the sender's own name if nothing follows it. */
+	private String commandArgument(String message, String command, ChatMessage chatMessage)
+	{
+		String typed = message.length() > command.length() ? message.substring(command.length()).trim() : "";
+		return typed.isEmpty() ? Text.sanitize(chatMessage.getName()) : typed;
+	}
+
+	/**
+	 * Overwrites the already-sent message's displayed text with the lookup
+	 * result — RuneLite's own bundled chat commands (!lvl, !kc, ...) use
+	 * this exact mechanism. Purely a local rendering override, same family
+	 * as playDropEmote()'s Actor.setAnimation: it changes nothing on the
+	 * wire, so it only shows up for other viewers whose own client also has
+	 * this command registered.
+	 */
+	private void setChatReply(ChatMessage chatMessage, String reply)
+	{
+		String colored = ColorUtil.wrapWithColorTag(reply, config.clanMessageColor());
+		clientThread.invokeLater(() -> {
+			MessageNode messageNode = chatMessage.getMessageNode();
+			messageNode.setRuneLiteFormatMessage(colored);
+			client.refreshChat();
+		});
+	}
+
+	private String describeRankError(String rsn, String error, String reason)
+	{
+		if ("not-on-runeprofile".equals(reason))
+		{
+			return rsn + " hasn't synced RuneProfile yet — install it and open your collection log.";
+		}
+		return "Rank lookup for " + rsn + " failed - " + error;
 	}
 
 	private String formatRankResult(BingoApiClient.RankLookupResult result)
 	{
 		String eligible = result.eligibleRank != null ? result.eligibleRank : "no rank yet";
-		String current = result.currentRank != null ? result.currentRank : "unranked";
-		return "Bingo: " + result.rsn + " qualifies for " + eligible + " (currently " + current + ") - "
-			+ result.overallSatisfied + "/" + result.overallTotal + " items";
+		return result.rsn + " qualifies for " + eligible + " - " + result.overallSatisfied + "/" + result.overallTotal + " items";
+	}
+
+	private String formatNeededResult(BingoApiClient.RankLookupResult result)
+	{
+		if (result.nextRank == null)
+		{
+			return result.rsn + " is already at the top rank.";
+		}
+		if (result.neededForNextRank == null || result.neededForNextRank <= 0)
+		{
+			return result.rsn + " already qualifies for " + result.nextRank + ".";
+		}
+
+		StringBuilder text = new StringBuilder()
+			.append(result.rsn).append(" needs ").append(result.neededForNextRank)
+			.append(" more for ").append(result.nextRank);
+		List<String> missing = result.missingItemNames;
+		if (missing != null && !missing.isEmpty())
+		{
+			text.append(": ");
+			int shown = Math.min(5, missing.size());
+			text.append(String.join(", ", missing.subList(0, shown)));
+			if (missing.size() > shown)
+			{
+				text.append(", +").append(missing.size() - shown).append(" more");
+			}
+		}
+		return text.toString();
+	}
+
+	private String formatLiveStreams(List<BingoApiClient.LiveStream> streams)
+	{
+		if (streams.isEmpty())
+		{
+			return "No clan members are live right now.";
+		}
+
+		int shown = Math.min(5, streams.size());
+		StringBuilder text = new StringBuilder("Live now: ");
+		for (int i = 0; i < shown; i++)
+		{
+			if (i > 0)
+			{
+				text.append(", ");
+			}
+			text.append(streams.get(i).displayName);
+		}
+		if (streams.size() > shown)
+		{
+			text.append(", +").append(streams.size() - shown).append(" more");
+		}
+		return text.toString();
+	}
+
+	/**
+	 * Backs the "Notify me when clan members go live" toggle. The first
+	 * check after startUp/reconnect only seeds previouslyLiveUsernames
+	 * silently — otherwise everyone already live at that moment would get
+	 * announced as "newly" live just because the plugin only just started
+	 * watching.
+	 */
+	private void checkLiveStreams()
+	{
+		if (!config.notifyLiveStreams())
+		{
+			return;
+		}
+
+		api.fetchLiveStreams(
+			streams -> {
+				Set<String> nowLive = new HashSet<>();
+				for (BingoApiClient.LiveStream stream : streams)
+				{
+					nowLive.add(stream.username);
+				}
+
+				Set<String> previous = previouslyLiveUsernames;
+				previouslyLiveUsernames = nowLive;
+				if (previous == null)
+				{
+					return;
+				}
+
+				for (BingoApiClient.LiveStream stream : streams)
+				{
+					if (!previous.contains(stream.username))
+					{
+						sendChatMessage(stream.displayName + " just went live", config.clanMessageColor());
+					}
+				}
+			},
+			error -> log.debug("Failed to check live streams: {}", error));
+	}
+
+	/**
+	 * Backs the "Remind me to sync RuneProfile" toggle. Only ever detects
+	 * "never set up on RuneProfile at all" (a 404 from the site, see
+	 * BingoApiClient#lookupRank's reason field) — there's no confirmed way
+	 * to tell a stale-but-present sync from a fresh one, so that case isn't
+	 * covered. Runs once per session, right after login.
+	 */
+	private void checkRuneProfileSync()
+	{
+		if (!config.remindRuneProfileSync() || checkedRuneProfileSync)
+		{
+			return;
+		}
+		Player local = client.getLocalPlayer();
+		if (local == null || local.getName() == null)
+		{
+			return;
+		}
+
+		checkedRuneProfileSync = true;
+		api.lookupRank(local.getName(),
+			result -> {},
+			(error, reason) -> {
+				if ("not-on-runeprofile".equals(reason))
+				{
+					sendChatMessage("You haven't synced RuneProfile yet — install it and open your"
+						+ " collection log so rank checks can see your progress.", config.clanMessageColor());
+				}
+			});
+	}
+
+	private static final String LAST_SEEN_BROADCAST_KEY = "lastSeenBroadcast";
+
+	/**
+	 * Backs the "Clan broadcasts" toggle: shows the latest one-off message an
+	 * admin has pushed out from the site's Board Config panel, once per
+	 * message. The last-shown timestamp is persisted via ConfigManager
+	 * (rather than kept in memory like checkedRuneProfileSync above) since a
+	 * broadcast can happen at any point during play, not just once per
+	 * session — an in-memory flag would re-show the same message after every
+	 * client restart.
+	 */
+	private void checkBroadcast()
+	{
+		if (!config.notifyBroadcasts())
+		{
+			return;
+		}
+
+		api.fetchBroadcast(
+			result -> {
+				if (result.message == null || result.message.isEmpty() || result.updatedAt == null)
+				{
+					return;
+				}
+				String lastSeen = configManager.getConfiguration(BingoConfig.GROUP, LAST_SEEN_BROADCAST_KEY);
+				if (result.updatedAt.equals(lastSeen))
+				{
+					return;
+				}
+				configManager.setConfiguration(BingoConfig.GROUP, LAST_SEEN_BROADCAST_KEY, result.updatedAt);
+				sendChatMessage(result.message, config.clanMessageColor());
+			},
+			error -> log.debug("Failed to check broadcast: {}", error));
 	}
 
 	private static class PendingSubmission

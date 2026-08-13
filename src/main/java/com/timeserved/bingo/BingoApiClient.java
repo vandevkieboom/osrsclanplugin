@@ -4,6 +4,9 @@ import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonSyntaxException;
 import java.io.IOException;
+import java.util.Collections;
+import java.util.List;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import javax.inject.Inject;
 import javax.inject.Singleton;
@@ -86,7 +89,7 @@ public class BingoApiClient
 					ResponseBody body = closeable.body();
 					if (!closeable.isSuccessful() || body == null)
 					{
-						onError.accept(describeFailure(closeable, body));
+						onError.accept(describeFailure(closeable, parseErrorBody(body)));
 						return;
 					}
 					onSuccess.accept(gson.fromJson(body.charStream(), BoardResponse.class));
@@ -153,7 +156,7 @@ public class BingoApiClient
 						onSuccess.run();
 						return;
 					}
-					onError.accept(describeFailure(closeable, body));
+					onError.accept(describeFailure(closeable, parseErrorBody(body)));
 				}
 			}
 		});
@@ -212,7 +215,7 @@ public class BingoApiClient
 						onSuccess.run();
 						return;
 					}
-					onError.accept(describeFailure(closeable, closeable.body()));
+					onError.accept(describeFailure(closeable, parseErrorBody(closeable.body())));
 				}
 			}
 		});
@@ -231,6 +234,15 @@ public class BingoApiClient
 
 		public int overallSatisfied;
 		public int overallTotal;
+
+		/** The next tier up from eligibleRank, or null if already at the top (or no ranks exist). */
+		public String nextRank;
+
+		/** How many more items are needed for nextRank; null when nextRank is null. */
+		public Integer neededForNextRank;
+
+		/** Up to 8 item names still missing for nextRank — never null, just possibly empty. */
+		public List<String> missingItemNames;
 	}
 
 	/**
@@ -238,13 +250,23 @@ public class BingoApiClient
 	 * the clan site's Clan Ranks page, server-side, for the given RSN. Only
 	 * ever reports what rank someone qualifies for — there's no way to
 	 * actually apply an in-game clan rank from here or anywhere else.
+	 *
+	 * <p>onError's second argument is the server's machine-readable failure
+	 * {@code reason} when it sent one (currently only "not-on-runeprofile"),
+	 * or null for anything else (including a plain network failure) — lets
+	 * callers like the RuneProfile-sync reminder act on a specific failure
+	 * without string-matching the human-readable message.
+	 *
+	 * <p>No plugin key: this is a read of data that's already fully public
+	 * on the clan site with no login needed, so unlike the bingo-specific
+	 * calls above, there's nothing here for a key to gate.
 	 */
-	public void lookupRank(String apiKey, String rsn, Consumer<RankLookupResult> onSuccess, Consumer<String> onError)
+	public void lookupRank(String rsn, Consumer<RankLookupResult> onSuccess, BiConsumer<String, String> onError)
 	{
 		HttpUrl base = HttpUrl.parse(BASE_URL + "/api/runeprofile-proxy");
 		if (base == null)
 		{
-			onError.accept("Invalid API base URL");
+			onError.accept("Invalid API base URL", null);
 			return;
 		}
 
@@ -255,7 +277,6 @@ public class BingoApiClient
 
 		Request request = new Request.Builder()
 			.url(url)
-			.header("Authorization", "Bearer " + apiKey)
 			.get()
 			.build();
 
@@ -265,6 +286,69 @@ public class BingoApiClient
 			public void onFailure(Call call, IOException e)
 			{
 				log.debug("Failed to look up rank for {}", rsn, e);
+				onError.accept("Could not reach the clan site", null);
+			}
+
+			@Override
+			public void onResponse(Call call, Response response)
+			{
+				try (Response closeable = response)
+				{
+					ResponseBody body = closeable.body();
+					if (!closeable.isSuccessful() || body == null)
+					{
+						ErrorBody err = parseErrorBody(body);
+						onError.accept(describeFailure(closeable, err), err.reason);
+						return;
+					}
+					onSuccess.accept(gson.fromJson(body.charStream(), RankLookupResult.class));
+				}
+				catch (JsonSyntaxException e)
+				{
+					log.debug("Malformed rank lookup response", e);
+					onError.accept("The clan site returned an unexpected response", null);
+				}
+			}
+		});
+	}
+
+	/** One currently-live stream — mirrors GET /api/twitch-live's LiveStream shape. */
+	public static class LiveStream
+	{
+		public String username;
+		public String displayName;
+		public String game;
+		public String title;
+		public int viewers;
+	}
+
+	private static class LiveStreamsResponse
+	{
+		List<LiveStream> streams;
+	}
+
+	/**
+	 * Which of the clan's known Twitch channels (site-configured, not
+	 * plugin-configured) are live right now. Public data, same as the
+	 * site's own homepage widget — no plugin key needed or sent.
+	 */
+	public void fetchLiveStreams(Consumer<List<LiveStream>> onSuccess, Consumer<String> onError)
+	{
+		HttpUrl url = HttpUrl.parse(BASE_URL + "/api/twitch-live");
+		if (url == null)
+		{
+			onError.accept("Invalid API base URL");
+			return;
+		}
+
+		Request request = new Request.Builder().url(url).get().build();
+
+		httpClient.newCall(request).enqueue(new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException e)
+			{
+				log.debug("Failed to fetch live streams", e);
 				onError.accept("Could not reach the clan site");
 			}
 
@@ -276,40 +360,124 @@ public class BingoApiClient
 					ResponseBody body = closeable.body();
 					if (!closeable.isSuccessful() || body == null)
 					{
-						onError.accept(describeFailure(closeable, body));
+						onError.accept(describeFailure(closeable, parseErrorBody(body)));
 						return;
 					}
-					onSuccess.accept(gson.fromJson(body.charStream(), RankLookupResult.class));
+					LiveStreamsResponse parsed = gson.fromJson(body.charStream(), LiveStreamsResponse.class);
+					onSuccess.accept(parsed.streams == null ? Collections.emptyList() : parsed.streams);
 				}
 				catch (JsonSyntaxException e)
 				{
-					log.debug("Malformed rank lookup response", e);
+					log.debug("Malformed live streams response", e);
 					onError.accept("The clan site returned an unexpected response");
 				}
 			}
 		});
 	}
 
-	/**
-	 * Surfaces the server's own {"error": "..."} message when there is one, so
-	 * the player sees "That tile is already complete" rather than "HTTP 409".
-	 */
-	private String describeFailure(Response response, ResponseBody body)
+	/** Result of a {@link #fetchBroadcast} call — mirrors GET /api/runeprofile-proxy?resource=broadcast. */
+	public static class BroadcastResult
 	{
+		public String message;
+
+		/** ISO-8601 timestamp of the last admin broadcast, or null if none has ever been sent. */
+		public String updatedAt;
+	}
+
+	/**
+	 * The latest one-off message an admin has pushed out from the site's
+	 * Board Config panel. Callers compare updatedAt against the last one
+	 * they've already shown to tell a new broadcast from one already seen —
+	 * this always returns the current message, not just new ones. Public,
+	 * no plugin key: same reasoning as lookupRank above.
+	 */
+	public void fetchBroadcast(Consumer<BroadcastResult> onSuccess, Consumer<String> onError)
+	{
+		HttpUrl base = HttpUrl.parse(BASE_URL + "/api/runeprofile-proxy");
+		if (base == null)
+		{
+			onError.accept("Invalid API base URL");
+			return;
+		}
+
+		HttpUrl url = base.newBuilder().addQueryParameter("resource", "broadcast").build();
+		Request request = new Request.Builder().url(url).get().build();
+
+		httpClient.newCall(request).enqueue(new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException e)
+			{
+				log.debug("Failed to fetch broadcast", e);
+				onError.accept("Could not reach the clan site");
+			}
+
+			@Override
+			public void onResponse(Call call, Response response)
+			{
+				try (Response closeable = response)
+				{
+					ResponseBody body = closeable.body();
+					if (!closeable.isSuccessful() || body == null)
+					{
+						onError.accept(describeFailure(closeable, parseErrorBody(body)));
+						return;
+					}
+					onSuccess.accept(gson.fromJson(body.charStream(), BroadcastResult.class));
+				}
+				catch (JsonSyntaxException e)
+				{
+					log.debug("Malformed broadcast response", e);
+					onError.accept("The clan site returned an unexpected response");
+				}
+			}
+		});
+	}
+
+	/** A parsed {"error": "...", "reason": "..."} body — reason is usually absent. */
+	private static class ErrorBody
+	{
+		String error;
+		String reason;
+	}
+
+	private ErrorBody parseErrorBody(ResponseBody body)
+	{
+		ErrorBody result = new ErrorBody();
 		if (body != null)
 		{
 			try
 			{
 				JsonObject json = gson.fromJson(body.charStream(), JsonObject.class);
-				if (json != null && json.has("error"))
+				if (json != null)
 				{
-					return json.get("error").getAsString();
+					if (json.has("error"))
+					{
+						result.error = json.get("error").getAsString();
+					}
+					if (json.has("reason"))
+					{
+						result.reason = json.get("reason").getAsString();
+					}
 				}
 			}
 			catch (JsonSyntaxException | IllegalStateException e)
 			{
 				log.debug("Non-JSON error response from clan site", e);
 			}
+		}
+		return result;
+	}
+
+	/**
+	 * Surfaces the server's own {"error": "..."} message when there is one, so
+	 * the player sees "That tile is already complete" rather than "HTTP 409".
+	 */
+	private String describeFailure(Response response, ErrorBody err)
+	{
+		if (err.error != null)
+		{
+			return err.error;
 		}
 
 		if (response.code() == 401)

@@ -1,9 +1,9 @@
-# Time Served Bingo
+# Time Served
 
-A RuneLite plugin for the Time Served clan's bingo events. When you receive a
-drop that matches one of your team's bingo tiles, it screenshots your client and
-submits it as proof to the clan site automatically, so nobody has to take and
-upload screenshots by hand.
+A RuneLite plugin for the Time Served clan — general clan tooling, with bingo
+as its first feature. When you receive a drop that matches one of your team's
+bingo tiles, it screenshots your client and submits it as proof to the clan
+site automatically, so nobody has to take and upload screenshots by hand.
 
 ## What it sends, and when
 
@@ -23,7 +23,7 @@ plugin doesn't approve anything, it just saves you the manual upload.
 
 1. Log in on the clan site and go to **Settings → RuneLite plugin keys**.
 2. Generate a key and copy it (it's only shown once).
-3. In RuneLite, enable **Time Served Bingo** and paste the key into
+3. In RuneLite, enable **Time Served** and paste the key into
    **Plugin key**.
 
 If a key is ever exposed, revoke it on the same settings page and generate a
