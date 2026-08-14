@@ -113,6 +113,19 @@ carefully reasoned through without a compiler.
    intermediate half-built layout. Fixed by hiding the whole panel
    (`content.setVisible(false)`) for the duration of the rebuild, only
    revealing it once layout and scroll position are both settled.
+4. **Rapid-killing a fast monster only ever submitted the first proof** —
+   `recentlyAttempted`'s dedup window was 30 seconds, keyed only on tile
+   id (meant to collapse `NpcLootReceived`/`LootReceived` firing twice for
+   ONE kill). Real bug: any second genuine kill of the same monster within
+   30 seconds got silently swallowed too, with no way to tell "duplicate
+   event" from "actually a new kill." Shrunk to 1.2s (2 game ticks) —
+   still covers the real duplicate-event case, no longer eats real kills.
+5. **The submission banner didn't look like the collection-log style it
+   was supposed to** — the first version used RuneLite's generic
+   `PanelComponent` box. Replaced with a direct port of Anvil's
+   `BingoClogBannerOverlay`, including its actual background asset
+   (`clog_banner.png`, copied as-is — see `THIRD_PARTY_NOTICES.md`) and
+   its open/hold/close animation, not an approximation.
 
 ## In-game Collection Log tab (first step only, untested)
 
