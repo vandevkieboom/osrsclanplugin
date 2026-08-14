@@ -20,6 +20,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -97,6 +98,9 @@ public class BingoPlugin extends Plugin
 	private BingoGroundItemsOverlay groundItemsOverlay;
 
 	@Inject
+	private BingoVerificationOverlay verificationOverlay;
+
+	@Inject
 	private ChatCommandManager chatCommandManager;
 
 	@Inject
@@ -107,6 +111,9 @@ public class BingoPlugin extends Plugin
 
 	@Inject
 	private BingoPanel bingoPanel;
+
+	@Inject
+	private PendingSubmissionStore pendingStore;
 
 	private NavigationButton bingoNavButton;
 
@@ -172,16 +179,22 @@ public class BingoPlugin extends Plugin
 		}
 	}
 
-	/** Screenshots that failed to upload over the network, waiting to retry. */
-	private final Deque<PendingSubmission> retryQueue = new ConcurrentLinkedDeque<>();
+	/**
+	 * Submissions (drop proofs and kc/xp readings) that failed to send over
+	 * the network, waiting to retry. Backed by PendingSubmissionStore, which
+	 * mirrors every entry to disk — startUp() reloads whatever survived a
+	 * previous session, so a client restart mid-outage no longer silently
+	 * loses a real drop with no way to reconstruct it afterwards.
+	 */
+	private final Deque<PendingSubmissionStore.PendingItem> retryQueue = new ConcurrentLinkedDeque<>();
 
 	/**
-	 * Caps how many failed screenshots this plugin holds in memory at once —
-	 * deliberately small and in-memory only (nothing persisted to disk), so a
-	 * prolonged outage drops the oldest queued screenshot rather than growing
-	 * without bound.
+	 * Caps how many failed items this plugin holds in memory (and thus on
+	 * disk) at once. Generous rather than tight, now that a restart can't
+	 * wipe the queue — this just bounds a genuinely prolonged, unresolved
+	 * outage rather than protecting against a restart the way it used to.
 	 */
-	private static final int MAX_RETRY_QUEUE = 20;
+	private static final int MAX_RETRY_QUEUE = 100;
 
 	/**
 	 * Tile id -> when it was last attempted (submitted or refused). This exists
@@ -199,6 +212,30 @@ public class BingoPlugin extends Plugin
 	 */
 	private final Map<String, Long> recentAttempts = new ConcurrentHashMap<>();
 	private static final long DEDUPE_WINDOW_MILLIS = TimeUnit.SECONDS.toMillis(30);
+
+	/**
+	 * Debounce buffer for kc chat-line reports: goalKey -> latest absolute kc
+	 * seen. Without this, a kill streak on a tracked boss fires one
+	 * report-and-refresh per kill. Since reportProgress only ever cares about
+	 * the newest absolute value (the server takes the max, same as the xp
+	 * path), buffering and sending the latest value once the streak goes
+	 * quiet is a pure win — same end result, far fewer requests.
+	 *
+	 * <p>Guarded by kcPushLock rather than made a ConcurrentHashMap: a plain
+	 * "copy the map, then clear it" drain (which is what flushing needs) is
+	 * two separate operations even on a concurrent map, and a put() landing
+	 * from the client thread in the gap between those two operations would
+	 * be silently wiped by the clear() — a genuinely lost kc update, not
+	 * just a delayed one. For a bingo where accuracy decides the winner,
+	 * that's not an acceptable trade for a debounce. The lock makes "put a
+	 * value" and "drain everything" fully mutually exclusive instead, at
+	 * the cost of a lock held only across a map put or a copy-and-clear —
+	 * both microseconds, and kc chat lines are human-paced, not a hot loop.
+	 */
+	private final Object kcPushLock = new Object();
+	private final Map<String, Long> pendingKcPush = new HashMap<>();
+	private volatile ScheduledFuture<?> kcPushTask;
+	private static final long KC_PUSH_COALESCE_MILLIS = TimeUnit.SECONDS.toMillis(15);
 
 	/**
 	 * Matches OSRS's generic "kill count" family of chat messages ("Your
@@ -238,6 +275,7 @@ public class BingoPlugin extends Plugin
 	protected void startUp()
 	{
 		overlayManager.add(groundItemsOverlay);
+		overlayManager.add(verificationOverlay);
 		chatCommandManager.registerCommandAsync(VERIFY_COMMAND, this::onRankCommand);
 		chatCommandManager.registerCommandAsync(NEEDED_COMMAND, this::onNeededCommand);
 		chatCommandManager.registerCommandAsync(LIVE_COMMAND, this::onLiveCommand);
@@ -249,6 +287,16 @@ public class BingoPlugin extends Plugin
 			.panel(bingoPanel)
 			.build();
 		clientToolbar.addNavigation(bingoNavButton);
+
+		List<PendingSubmissionStore.PendingItem> restored = pendingStore.loadAll();
+		if (!restored.isEmpty())
+		{
+			log.debug("Restored {} pending submission(s) from a previous session", restored.size());
+		}
+		for (PendingSubmissionStore.PendingItem item : restored)
+		{
+			enqueueRetry(item);
+		}
 
 		refreshBoard();
 	}
@@ -284,11 +332,21 @@ public class BingoPlugin extends Plugin
 	protected void shutDown()
 	{
 		overlayManager.remove(groundItemsOverlay);
+		overlayManager.remove(verificationOverlay);
 		chatCommandManager.unregisterCommand(VERIFY_COMMAND);
 		chatCommandManager.unregisterCommand(NEEDED_COMMAND);
 		chatCommandManager.unregisterCommand(LIVE_COMMAND);
 		clientToolbar.removeNavigation(bingoNavButton);
 		bingoPanel.dispose();
+		ScheduledFuture<?> pendingFlush = kcPushTask;
+		if (pendingFlush != null)
+		{
+			pendingFlush.cancel(false);
+		}
+		synchronized (kcPushLock)
+		{
+			pendingKcPush.clear();
+		}
 		tilesByItemId.clear();
 		recentAttempts.clear();
 		for (TrackedGroundItem tracked : trackedGroundItems.values())
@@ -446,11 +504,33 @@ public class BingoPlugin extends Plugin
 				// below — this call is itself made from inside
 				// refreshBoard()'s own callback, so that would recurse
 				// forever. The next scheduled refresh picks up the new total.
-				api.reportProgress(apiKey, "xp", tile.goalKey, xp,
-					() -> {},
-					error -> log.debug("Failed to report {} xp: {}", skill, error));
+				reportGoalWithRetry(apiKey, "xp", tile.goalKey, xp);
 			}
 		});
+	}
+
+	/**
+	 * Reports one absolute kc/xp reading, persisting it to disk for retry if
+	 * the request can't reach the site at all. A rejection from the server
+	 * itself (as opposed to a transport failure) is never retried — same
+	 * "the server is the authority" principle the drop-proof retry already
+	 * follows.
+	 */
+	private void reportGoalWithRetry(String apiKey, String goalKind, String goalKey, long value)
+	{
+		api.reportProgress(apiKey, goalKind, goalKey, value,
+			() -> {},
+			error -> {
+				log.debug("Failed to report {} {}: {}", goalKind, goalKey, error);
+				if ("Could not reach the clan site".equals(error))
+				{
+					PendingSubmissionStore.PendingItem item = pendingStore.saveGoal(goalKind, goalKey, value);
+					if (item != null)
+					{
+						enqueueRetry(item);
+					}
+				}
+			});
 	}
 
 	/**
@@ -526,18 +606,63 @@ public class BingoPlugin extends Plugin
 			return;
 		}
 
-		String apiKey = config.apiKey().trim();
-		if (apiKey.isEmpty())
+		if (config.apiKey().trim().isEmpty())
 		{
 			return;
 		}
-		// Unlike the xp report below, this one is safe to follow with a
-		// refresh: it's not itself running inside refreshBoard()'s callback,
-		// so there's no risk of looping — just an instant panel update the
-		// moment a tracked kill count ticks over.
-		api.reportProgress(apiKey, "kc", tile.goalKey, kc,
-			this::refreshBoard,
-			error -> log.debug("Failed to report {} kc: {}", tile.goalKey, error));
+		// Buffered rather than sent immediately — see pendingKcPush. A kill
+		// streak on the same boss just keeps overwriting this entry with the
+		// newest count until the streak goes quiet and scheduleKcPushFlush's
+		// task actually fires.
+		synchronized (kcPushLock)
+		{
+			pendingKcPush.put(tile.goalKey, kc);
+		}
+		scheduleKcPushFlush();
+	}
+
+	/**
+	 * (Re)schedules the kc-push flush, cancelling any pending one first —
+	 * classic debounce: the flush only actually runs once KC_PUSH_COALESCE_MILLIS
+	 * passes with no further kc ticks. A rapid kill streak keeps pushing the
+	 * schedule back, so it collapses to one flush (and one refresh) for the
+	 * whole streak instead of one per kill.
+	 */
+	private void scheduleKcPushFlush()
+	{
+		ScheduledFuture<?> existing = kcPushTask;
+		if (existing != null)
+		{
+			existing.cancel(false);
+		}
+		kcPushTask = executor.schedule(this::flushKcPush, KC_PUSH_COALESCE_MILLIS, TimeUnit.MILLISECONDS);
+	}
+
+	/** Sends every buffered kc reading, then refreshes once for the whole batch. */
+	private void flushKcPush()
+	{
+		String apiKey = config.apiKey().trim();
+
+		Map<String, Long> toSend;
+		synchronized (kcPushLock)
+		{
+			if (apiKey.isEmpty() || pendingKcPush.isEmpty())
+			{
+				pendingKcPush.clear();
+				return;
+			}
+			toSend = new HashMap<>(pendingKcPush);
+			pendingKcPush.clear();
+		}
+
+		for (Map.Entry<String, Long> entry : toSend.entrySet())
+		{
+			reportGoalWithRetry(apiKey, "kc", entry.getKey(), entry.getValue());
+		}
+		// One refresh for the whole flushed batch, not one per boss — mirrors
+		// the same "your own action updates instantly" pattern the drop path
+		// uses, just coalesced the way the pushes themselves now are.
+		refreshBoard();
 	}
 
 	@Subscribe
@@ -664,7 +789,6 @@ public class BingoPlugin extends Plugin
 			return;
 		}
 
-		PendingSubmission submission = new PendingSubmission(tile, itemId, itemName, png);
 		api.submitProof(
 			config.apiKey().trim(),
 			tile.tileId,
@@ -680,23 +804,29 @@ public class BingoPlugin extends Plugin
 				if ("Could not reach the clan site".equals(error))
 				{
 					recentAttempts.remove(tile.tileId);
-					enqueueRetry(submission);
+					PendingSubmissionStore.PendingItem item = pendingStore.saveProof(tile.tileId, tile.name, itemId, itemName, png);
+					if (item != null)
+					{
+						enqueueRetry(item);
+					}
 				}
 				notifyPlayer(itemName + " not submitted — " + error);
 			});
 	}
 
-	private void enqueueRetry(PendingSubmission submission)
+	/** Adds an item to the in-memory retry queue, evicting (and deleting from disk) the oldest if it's full. */
+	private void enqueueRetry(PendingSubmissionStore.PendingItem item)
 	{
 		if (retryQueue.size() >= MAX_RETRY_QUEUE)
 		{
-			PendingSubmission dropped = retryQueue.poll();
+			PendingSubmissionStore.PendingItem dropped = retryQueue.poll();
 			if (dropped != null)
 			{
-				log.warn("Bingo retry queue full — dropping oldest queued screenshot for tile {}", dropped.tile.tileId);
+				pendingStore.remove(dropped);
+				log.warn("Bingo retry queue full — dropping oldest queued item {}", dropped.id);
 			}
 		}
-		retryQueue.add(submission);
+		retryQueue.add(item);
 	}
 
 	private void retryPendingSubmissions()
@@ -707,29 +837,69 @@ public class BingoPlugin extends Plugin
 			return;
 		}
 
-		PendingSubmission submission;
-		while ((submission = retryQueue.poll()) != null)
+		PendingSubmissionStore.PendingItem item;
+		while ((item = retryQueue.poll()) != null)
 		{
-			retrySubmission(apiKey, submission);
+			if (item.isGoal())
+			{
+				retryGoalItem(apiKey, item);
+			}
+			else
+			{
+				retryProofItem(apiKey, item);
+			}
 		}
 	}
 
-	private void retrySubmission(String apiKey, PendingSubmission submission)
+	private void retryProofItem(String apiKey, PendingSubmissionStore.PendingItem item)
 	{
+		byte[] png = pendingStore.readScreenshot(item);
+		if (png == null)
+		{
+			// The screenshot itself is gone (disk issue between sessions) —
+			// nothing left to retry with.
+			pendingStore.remove(item);
+			return;
+		}
+
 		api.submitProof(
 			apiKey,
-			submission.tile.tileId,
-			submission.itemId,
-			submission.png,
-			() -> onSubmitted(submission.itemName, submission.tile.name),
+			item.tileId,
+			item.itemId,
+			png,
+			() -> {
+				pendingStore.remove(item);
+				onSubmitted(item.itemName, item.tileName);
+			},
 			error -> {
 				if ("Could not reach the clan site".equals(error))
 				{
-					enqueueRetry(submission);
+					enqueueRetry(item);
 				}
 				else
 				{
-					notifyPlayer(submission.itemName + " not submitted — " + error);
+					pendingStore.remove(item);
+					notifyPlayer(item.itemName + " not submitted — " + error);
+				}
+			});
+	}
+
+	private void retryGoalItem(String apiKey, PendingSubmissionStore.PendingItem item)
+	{
+		api.reportProgress(apiKey, item.goalKind, item.goalKey, item.goalValue,
+			() -> {
+				pendingStore.remove(item);
+				refreshBoard();
+			},
+			error -> {
+				if ("Could not reach the clan site".equals(error))
+				{
+					enqueueRetry(item);
+				}
+				else
+				{
+					pendingStore.remove(item);
+					log.debug("Dropped queued {} report for {}: {}", item.goalKind, item.goalKey, error);
 				}
 			});
 	}
@@ -1050,21 +1220,5 @@ public class BingoPlugin extends Plugin
 				sendChatMessage(result.message, config.clanMessageColor());
 			},
 			error -> log.debug("Failed to check broadcast: {}", error));
-	}
-
-	private static class PendingSubmission
-	{
-		private final BoardResponse.Tile tile;
-		private final int itemId;
-		private final String itemName;
-		private final byte[] png;
-
-		private PendingSubmission(BoardResponse.Tile tile, int itemId, String itemName, byte[] png)
-		{
-			this.tile = tile;
-			this.itemId = itemId;
-			this.itemName = itemName;
-			this.png = png;
-		}
 	}
 }

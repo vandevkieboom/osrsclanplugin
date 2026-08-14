@@ -144,6 +144,30 @@ public interface BingoConfig extends Config
 		return true;
 	}
 
+	@ConfigItem(
+		keyName = "showVerificationOverlay",
+		name = "Verification overlay",
+		description = "Show the verification code and a live timestamp, so it's baked into every proof screenshot.",
+		section = bingoSection,
+		position = 12
+	)
+	default boolean showVerificationOverlay()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "verificationCode",
+		name = "Verification code",
+		description = "Whatever code your clan admin announced for the current event (e.g. in Discord) — not fetched from the site, just typed in here.",
+		section = bingoSection,
+		position = 13
+	)
+	default String verificationCode()
+	{
+		return "";
+	}
+
 	@Alpha
 	@ConfigItem(
 		keyName = "groundItemHighlightColor",
