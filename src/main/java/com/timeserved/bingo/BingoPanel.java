@@ -137,6 +137,18 @@ public class BingoPanel extends PluginPanel
 	{
 		int scrollPosition = scrollPane.getVerticalScrollBar().getValue();
 
+		// Hidden for the whole teardown-and-rebuild below, not just the
+		// scroll-position correction: rebuilding every section fresh means
+		// their combined height is briefly whatever partial state they're
+		// in mid-rebuild (e.g. a section not added yet, or the board grid's
+		// real height not yet known — see loadIconInto), which BoxLayout is
+		// free to lay out and paint before this method even returns. A
+		// hidden component is skipped by its parent's paint entirely, so
+		// none of those intermediate layouts are ever actually shown —
+		// setVisible(true) in the deferred callback below is the first
+		// paint anyone sees, and by then the layout is already final.
+		content.setVisible(false);
+
 		lastSyncedAt = System.currentTimeMillis();
 		content.removeAll();
 
@@ -180,6 +192,7 @@ public class BingoPanel extends PluginPanel
 		// the scrollbar is already right before anything is drawn at all, so that frame never happens.
 		SwingUtilities.invokeLater(() -> {
 			scrollPane.getVerticalScrollBar().setValue(scrollPosition);
+			content.setVisible(true);
 			content.repaint();
 		});
 	}

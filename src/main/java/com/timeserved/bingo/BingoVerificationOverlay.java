@@ -22,11 +22,14 @@ import net.runelite.client.ui.overlay.components.PanelComponent;
  * whole point of it being something only real participants know. An admin
  * decides on a code and shares it directly (e.g. in Discord) instead.
  *
- * <p>Since this is a normal RuneLite overlay, it's part of the rendered
- * frame the same as anything else on screen — captureAndSubmit's
- * drawManager.requestNextFrameListener call picks it up automatically, so
- * every proof screenshot has it baked in with no special-casing needed at
- * capture time.
+ * <p>Only actually draws while {@link #setCaptureMode} is on — same idea as
+ * Anvil's version: the point is for it to be baked into the proof
+ * screenshot, not for it to sit on the player's screen the whole time
+ * they're playing. BingoPlugin#captureAndSubmit flips this on right before
+ * calling drawManager.requestNextFrameListener and back off once that frame
+ * has been captured, so it's visible for at most the single frame that
+ * actually gets saved — imperceptible in normal play, but still part of the
+ * rendered frame DrawManager captures, so it's in the screenshot every time.
  */
 class BingoVerificationOverlay extends Overlay
 {
@@ -34,6 +37,7 @@ class BingoVerificationOverlay extends Overlay
 
 	private final BingoConfig config;
 	private final PanelComponent panelComponent = new PanelComponent();
+	private volatile boolean captureMode;
 
 	@Inject
 	private BingoVerificationOverlay(BingoConfig config)
@@ -43,10 +47,16 @@ class BingoVerificationOverlay extends Overlay
 		setLayer(OverlayLayer.ABOVE_SCENE);
 	}
 
+	/** Toggled by BingoPlugin around a single drawManager capture — see the class doc. */
+	void setCaptureMode(boolean captureMode)
+	{
+		this.captureMode = captureMode;
+	}
+
 	@Override
 	public Dimension render(Graphics2D graphics)
 	{
-		if (!config.showVerificationOverlay())
+		if (!captureMode || !config.showVerificationOverlay())
 		{
 			return null;
 		}

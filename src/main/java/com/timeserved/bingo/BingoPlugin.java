@@ -486,7 +486,13 @@ public class BingoPlugin extends Plugin
 			// whole cycle here is harmless — the next refresh after actual
 			// login (onGameStateChanged already triggers one) reports the
 			// real reading instead.
-			if (client.getGameState() != GameState.LOGGED_IN)
+			// GameState alone isn't quite enough: it can flip to LOGGED_IN a
+			// moment before the player/skill data behind it is actually
+			// populated (most likely right after a client restart), and
+			// getSkillExperience() reads 0 in that gap. Checking the local
+			// player exists too closes most of that window.
+			if (client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null
+				|| client.getLocalPlayer().getName() == null)
 			{
 				return;
 			}
@@ -499,6 +505,19 @@ public class BingoPlugin extends Plugin
 					continue;
 				}
 				long xp = client.getSkillExperience(skill);
+				if (xp <= 0)
+				{
+					// Belt-and-braces on top of the guard above: a 0 (or
+					// corrupt negative) reading becomes a PERMANENT baseline
+					// server-side if this is the first-ever report for this
+					// (player, skill) — recordGoalProgress never touches
+					// baseline_value again after it's set. Skipping this one
+					// skill this cycle costs nothing (the next refresh tries
+					// again); reporting a bad 0 here would wrongly count the
+					// player's entire lifetime xp as "progress" forever,
+					// until someone notices and resets the whole board.
+					continue;
+				}
 				BoardResponse.Tile tile = entry.getValue();
 				// No refreshBoard() on success here, unlike the kc report
 				// below — this call is itself made from inside
@@ -764,7 +783,11 @@ public class BingoPlugin extends Plugin
 
 	private void captureAndSubmit(BoardResponse.Tile tile, int itemId, String itemName)
 	{
+		// On for exactly the frame this listener captures, then straight back off — see
+		// BingoVerificationOverlay's class doc for why this is a toggle and not "always visible".
+		verificationOverlay.setCaptureMode(true);
 		drawManager.requestNextFrameListener(image -> {
+			verificationOverlay.setCaptureMode(false);
 			// Copy the frame before leaving the render callback: the Image the
 			// client hands over is not ours to keep.
 			BufferedImage frame = ImageUtil.bufferedImageFromImage(image);
