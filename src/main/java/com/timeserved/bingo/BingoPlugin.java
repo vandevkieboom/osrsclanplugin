@@ -101,6 +101,9 @@ public class BingoPlugin extends Plugin
 	private BingoVerificationOverlay verificationOverlay;
 
 	@Inject
+	private BingoProgressBanner progressBanner;
+
+	@Inject
 	private ChatCommandManager chatCommandManager;
 
 	@Inject
@@ -276,6 +279,7 @@ public class BingoPlugin extends Plugin
 	{
 		overlayManager.add(groundItemsOverlay);
 		overlayManager.add(verificationOverlay);
+		overlayManager.add(progressBanner);
 		chatCommandManager.registerCommandAsync(VERIFY_COMMAND, this::onRankCommand);
 		chatCommandManager.registerCommandAsync(NEEDED_COMMAND, this::onNeededCommand);
 		chatCommandManager.registerCommandAsync(LIVE_COMMAND, this::onLiveCommand);
@@ -333,6 +337,7 @@ public class BingoPlugin extends Plugin
 	{
 		overlayManager.remove(groundItemsOverlay);
 		overlayManager.remove(verificationOverlay);
+		overlayManager.remove(progressBanner);
 		chatCommandManager.unregisterCommand(VERIFY_COMMAND);
 		chatCommandManager.unregisterCommand(NEEDED_COMMAND);
 		chatCommandManager.unregisterCommand(LIVE_COMMAND);
@@ -935,6 +940,7 @@ public class BingoPlugin extends Plugin
 	{
 		notifyPlayer("Submitted " + itemName + " for tile \"" + tileName + "\"");
 		bingoPanel.notifyAutoSubmitted(itemName);
+		progressBanner.show("Bingo proof submitted", itemName + " — " + tileName);
 		refreshBoard();
 	}
 
