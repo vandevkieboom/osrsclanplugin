@@ -1,11 +1,48 @@
 # Time Served plugin — context for continuing this work
 
 RuneLite plugin for the Time Served OSRS clan. Auto-submits bingo tile proofs
-(screenshot on a matching drop), reports team-combined skill XP / boss KC
-live, and has `!verify`/`!needed`/`!live` chat commands. Talks to the clan
-site at `https://timeserved.vercel.app` (companion repo: `osrsclan`, same
-parent folder) via `BingoApiClient`, authenticated with a plugin key pasted
-into config (`BingoConfig.apiKey()`).
+(screenshot on a matching drop) and has `!verify`/`!needed`/`!live` chat
+commands. Team-combined skill XP / boss KC tiles are display-only here — the
+plugin reports nothing for them; their progress is tracked entirely
+server-side from WOM hiscores (see "Goal-progress tracking" below). Talks to
+the clan site at `https://timeserved.vercel.app` (companion repo: `osrsclan`,
+same parent folder) via `BingoApiClient`, authenticated with a plugin key
+pasted into config (`BingoConfig.apiKey()`).
+
+## Goal-progress tracking (XP/KC tiles) — reworked to hiscores-only
+
+The plugin used to parse kill-count chat lines and push its own skill-XP
+readings directly to the site, with the server treating each member's
+first-ever report as their permanent baseline. Real desktop testing showed
+this was fundamentally unreliable: the first kill on a kill-count tile
+sometimes never counted (a `NpcLootReceived`/`LootReceived` firing order
+quirk could beat the chat-line parse), an XP tile sometimes silently
+recorded a baseline mid-session and credited already-gained XP as
+"progress," and a board reset didn't reliably re-seed every member's
+baseline at the same moment. The common cause: baselines were set
+implicitly, whenever a report happened to be the first one the server saw,
+staggered across whenever each person's client next reported (or never, for
+a player who doesn't run the plugin).
+
+The fix removed all of it from this plugin: `KILLCOUNT_PATTERN`, the
+`onChatMessage` chat-parsing handler, the `pendingKcPush`/`kcPushLock`
+debounce buffer, `reportXpProgress`/`skillFromName`, and
+`BingoApiClient#reportProgress` (the goal-progress HTTP call) are all gone,
+along with the goal fields (`goalKind`/`goalKey`/`goalValue`, `saveGoal()`,
+`isGoal()`) that used to let `PendingSubmissionStore` hold a failed goal
+report alongside a failed drop proof — that store is proof-only now.
+`refreshBoard()` only ever builds the item-id lookup `handleLoot()` checks
+drops against; xp/kc tiles are skipped entirely when building it, since
+there's nothing left to report for them. `BoardResponse.Tile.goalKind`/
+`teamProgress` stay, purely for `BingoPanel` to *display* the number the
+server already computed.
+
+The website side now owns 100% of xp/kc tracking, sourced only from real
+hiscores — see `osrsclan`'s `CLAUDE.md` for `seedGoalBaselines` /
+`refreshGoalLatestValues`. The plugin-writable
+`POST /api/board?resource=goal-progress` endpoint was removed on that side
+too, so there's no longer any path for a plugin (buggy or malicious) to
+write an arbitrary progress value directly.
 
 ## Reference plugin: Anvil
 
@@ -23,9 +60,11 @@ run and have no access to.
 
 Ideas actually adapted from it into this plugin (same principle, rewritten
 to fit our own schema/auth, not copied code):
-- KC/XP push debouncing (coalesce a kill streak into one request).
-- Treating hiscores as a correcting backstop rather than the only source of
-  truth for XP/KC (see `osrsclan`'s `reconcileGoalProgress`).
+- Treating hiscores as the source of truth for XP/KC tracking rather than a
+  plugin's own live reporting — see "Goal-progress tracking" above. (An
+  earlier version of this plugin instead adapted Anvil's kill-count-push
+  debouncing idea; that was removed along with the rest of the live-push
+  path once hiscores-only replaced it entirely.)
 - Disk-persisted retry queue for failed submissions (`PendingSubmissionStore`).
 - The idea of a verification code/timestamp baked into proof screenshots
   (though the *mechanism* ended up different from Anvil's — see below).
@@ -62,19 +101,19 @@ carefully reasoned through without a compiler.
 
 ## What changed on this branch, and why
 
-1. **KC-push debouncing** (`BingoPlugin`) — a kill streak on a tracked boss
-   used to fire one report + one board refresh per kill. Now buffers the
-   latest count and flushes after 15s of quiet (`pendingKcPush`,
-   `KC_PUSH_COALESCE_MILLIS`), guarded by `kcPushLock` — a naive
-   copy-then-clear drain had a real race that could silently drop an update
-   landing mid-drain; the lock makes put/drain mutually exclusive.
+1. **KC/XP live push removed entirely** (`BingoPlugin`) — see
+   "Goal-progress tracking" above for why. An intermediate version of this
+   branch had a KC-push debounce (`pendingKcPush`/`kcPushLock`,
+   `KC_PUSH_COALESCE_MILLIS`) that coalesced a kill streak into one report;
+   it's gone now along with everything else in the live-push path.
 
 2. **Disk-persisted retry queue** (`PendingSubmissionStore`, new file) —
-   failed drop proofs and failed kc/xp reports used to live in an
-   in-memory-only queue capped at 20, wiped on every restart. Now both
-   persist to `<runelite dir>/timeserved-bingo-pending/` (JSON + PNG for
-   proofs, JSON only for goal readings) and get reloaded on `startUp()`. Cap
-   raised to 100 since disk makes holding more of them safe.
+   failed drop proofs used to live in an in-memory-only queue capped at 20,
+   wiped on every restart. Now persists to
+   `<runelite dir>/timeserved-bingo-pending/` (JSON + PNG per proof) and
+   gets reloaded on `startUp()`. Cap raised to 100 since disk makes holding
+   more of them safe. (This used to also hold failed goal-progress reports;
+   that half was removed with the rest of the live-push path.)
 
 3. **Verification code overlay** (`BingoVerificationOverlay`, new file) —
    renders a manually-typed config value (`BingoConfig.verificationCode()`)
@@ -97,15 +136,15 @@ carefully reasoned through without a compiler.
    `setCaptureMode(true)`, which `BingoPlugin#captureAndSubmit` toggles on
    for exactly the one frame `drawManager` captures, then back off.
 2. **XP tiles came back "completed" right after a board reset** — traced to
-   a real race: `reportXpProgress` only checked `GameState.LOGGED_IN`,
-   which can flip true a moment before skill data is actually populated
-   (most likely right after a client restart). A `0` read in that gap
-   becomes a **permanent** baseline (`recordGoalProgress` never touches
-   `baseline_value` again), silently crediting a player's entire lifetime
-   XP as "progress." Fixed with a stronger guard (also require
-   `getLocalPlayer()` to exist) plus skipping the report outright if the
-   read is `0`. Two already-poisoned rows were manually deleted from the
-   live DB so they'd re-seed cleanly.
+   a real race in the now-removed `reportXpProgress`: it only checked
+   `GameState.LOGGED_IN`, which can flip true a moment before skill data is
+   actually populated (most likely right after a client restart). A `0`
+   read in that gap became a **permanent** baseline, silently crediting a
+   player's entire lifetime XP as "progress." Patched at the time with a
+   stronger guard, but this whole reporting path — and the class of bug it
+   was prone to — is now moot: it was removed entirely in favor of
+   hiscores-only tracking (see "Goal-progress tracking" above), which never
+   reads a live in-client value at all.
 3. **Team Goals section visibly jumped/overlapped on every board refresh**
    — `BingoPanel.refresh()` does a full teardown-and-rebuild every time,
    and tile icons load asynchronously, so the board section's real height
@@ -176,27 +215,28 @@ already uses.
 
 ## What to actually test on this desktop
 
-- [ ] `./gradlew compileJava` — first time this has compiled at all.
+- [ ] `./gradlew compileJava` — no JDK was available while doing the
+      hiscores-only rework (see "Goal-progress tracking" above), so the
+      result was only manually proofread, not compiled. Do this first.
 - [ ] `./gradlew runClient`, log in, set a plugin key.
 - [ ] Get a bingo drop with the site/network reachable — confirm normal
       submit still works.
 - [ ] Force a failure (wrong site URL, or disconnect), get a drop, confirm
       it queues; restart the client; confirm it retries and submits once
-      reachable again (this is the main new behavior — didn't exist before).
-- [ ] Same for a kc-tile kill while unreachable.
-- [ ] Rapid-kill a tracked boss (or fake it) and confirm only one report
-      goes out after ~15s quiet, not one per kill.
+      reachable again.
+- [ ] Open a kill-count or xp tile's board display and confirm it shows a
+      number at all (server-computed `teamProgress`) — there's nothing left
+      in the plugin to trigger for it, so this only proves the read path.
 - [ ] Set a verification code in config, confirm it + a timestamp render
       top-left, and confirm a submitted proof screenshot actually has it
       baked in.
 
 ## Related: the `osrsclan` site repo
 
-The same session also changed `osrsclan` (already merged to its `main`,
-already pushed): `goal_progress` now self-corrects against WOM hiscores
-(throttled, runs from `GET /api/board`) instead of trusting the plugin's
-live push as the only source, and seeds a starting baseline for team
-members who've never opened the plugin (mobile-only players). See that
-repo's own `CLAUDE.md` for what's still an open decision there — a one-time
-~318-row backfill hasn't been triggered on the live board yet, pending a
-call on timing/fairness.
+This session's rework touched both repos together — the plugin side removed
+all live KC/XP reporting (see "Goal-progress tracking" above); the site side
+(`osrsclan`) split the old mixed correction+seeding function into
+`seedGoalBaselines` (explicit, only from a reset or a tile's goal being
+created/changed) and `refreshGoalLatestValues` (correction-only backstop),
+and removed the now-unnecessary `POST /api/board?resource=goal-progress`
+endpoint entirely. See that repo's own `CLAUDE.md` for the full design.

@@ -18,16 +18,11 @@ import lombok.extern.slf4j.Slf4j;
 import net.runelite.client.RuneLite;
 
 /**
- * Persists submissions that failed to send (a bingo drop screenshot, or a
- * kc/xp reading) to disk, so a client restart doesn't silently lose them —
- * the previous in-memory-only retry queue was wiped on every restart, which
- * for a drop specifically means losing the only evidence of something that
- * actually happened in game, with no way to reconstruct it afterwards.
- *
- * <p>Two kinds of item share this store rather than each getting their own:
- * a "proof" item (a drop's screenshot, tied to a specific tile) and a
- * "goal" item (a kc/xp reading with no image). Both are just JSON on disk;
- * a proof additionally has a PNG alongside it.
+ * Persists bingo drop proof submissions that failed to send to disk, so a
+ * client restart doesn't silently lose them — the previous in-memory-only
+ * retry queue was wiped on every restart, which means losing the only
+ * evidence of something that actually happened in game, with no way to
+ * reconstruct it afterwards.
  */
 @Slf4j
 @Singleton
@@ -48,28 +43,17 @@ public class PendingSubmissionStore
 		this.gson = gson.newBuilder().setPrettyPrinting().create();
 	}
 
-	/** One persisted item — either a drop's proof (screenshotFile set) or a kc/xp reading (goalKind set), never both. */
+	/** One persisted drop proof, awaiting retry. */
 	public static class PendingItem
 	{
 		public String id;
 		public long timestamp;
 
-		// Proof fields — null/unset when this is a goal item.
 		public String tileId;
 		public String tileName;
 		public Integer itemId;
 		public String itemName;
 		public String screenshotFile;
-
-		// Goal fields — null/unset when this is a proof item.
-		public String goalKind;
-		public String goalKey;
-		public Long goalValue;
-
-		public boolean isGoal()
-		{
-			return goalKind != null;
-		}
 	}
 
 	private void init()
@@ -110,20 +94,6 @@ public class PendingSubmissionStore
 			return null;
 		}
 		return item;
-	}
-
-	/** Persists a failed kc/xp reading (no image) to disk. Returns null if the write failed. */
-	public PendingItem saveGoal(String goalKind, String goalKey, long value)
-	{
-		init();
-		PendingItem item = new PendingItem();
-		item.timestamp = System.currentTimeMillis();
-		item.id = "goal-" + goalKind + "-" + goalKey + "-" + item.timestamp;
-		item.goalKind = goalKind;
-		item.goalKey = goalKey;
-		item.goalValue = value;
-
-		return writeJson(item) ? item : null;
 	}
 
 	private boolean writeJson(PendingItem item)

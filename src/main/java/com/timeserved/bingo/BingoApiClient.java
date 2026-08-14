@@ -39,7 +39,6 @@ public class BingoApiClient
 	 * param instead (see submitPluginProof in api/board.ts).
 	 */
 	private static final MediaType OCTET_STREAM = MediaType.parse("application/octet-stream");
-	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final String SCREENSHOT_CONTENT_TYPE = "image/png";
 
 	private final OkHttpClient httpClient;
@@ -157,65 +156,6 @@ public class BingoApiClient
 						return;
 					}
 					onError.accept(describeFailure(closeable, parseErrorBody(body)));
-				}
-			}
-		});
-	}
-
-	/**
-	 * Reports this member's current reading for a team-combined xp/kc goal
-	 * (see {@link BoardResponse.Tile#goalKind}). The server tracks each
-	 * member's own first-ever reading as their baseline and sums
-	 * (latest − baseline) across the team, so this is safe to call
-	 * repeatedly with the same or a higher value — there's no local state to
-	 * get out of sync with.
-	 */
-	public void reportProgress(
-		String apiKey,
-		String goalKind,
-		String goalKey,
-		long value,
-		Runnable onSuccess,
-		Consumer<String> onError)
-	{
-		HttpUrl url = HttpUrl.parse(BASE_URL + "/api/board");
-		if (url == null)
-		{
-			onError.accept("Invalid API base URL");
-			return;
-		}
-
-		JsonObject body = new JsonObject();
-		body.addProperty("goalKind", goalKind);
-		body.addProperty("goalKey", goalKey);
-		body.addProperty("value", value);
-
-		Request request = new Request.Builder()
-			.url(url.newBuilder().addQueryParameter("resource", "goal-progress").build())
-			.header("Authorization", "Bearer " + apiKey)
-			.post(RequestBody.create(JSON, gson.toJson(body)))
-			.build();
-
-		httpClient.newCall(request).enqueue(new Callback()
-		{
-			@Override
-			public void onFailure(Call call, IOException e)
-			{
-				log.debug("Failed to report bingo goal progress", e);
-				onError.accept("Could not reach the clan site");
-			}
-
-			@Override
-			public void onResponse(Call call, Response response)
-			{
-				try (Response closeable = response)
-				{
-					if (closeable.isSuccessful())
-					{
-						onSuccess.run();
-						return;
-					}
-					onError.accept(describeFailure(closeable, parseErrorBody(closeable.body())));
 				}
 			}
 		});

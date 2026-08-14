@@ -80,11 +80,12 @@ public class BoardResponse
 		public List<Integer> itemIds;
 
 		/**
-		 * "item" (the default) is the proof/review tile this plugin has always
-		 * handled; "xp"/"kc" is a team-combined total this plugin reports
-		 * readings toward directly (see {@link BingoApiClient#reportProgress})
+		 * "item" (the default) is the proof/review tile this plugin submits
+		 * screenshots for; "xp"/"kc" is a team-combined total tracked entirely
+		 * server-side from the clan's hiscores (see osrsclan/api/_lib/board.ts)
 		 * — those tiles are never in {@code itemIds} and never take a
-		 * screenshot, they're just watched and reported.
+		 * screenshot, they're purely display: teamProgress below is all the
+		 * plugin needs to show for them.
 		 */
 		public String goalKind;
 

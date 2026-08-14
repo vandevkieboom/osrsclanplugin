@@ -20,10 +20,6 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
-import java.util.concurrent.TimeUnit;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import javax.imageio.ImageIO;
 import javax.inject.Inject;
 import javax.swing.SwingUtilities;
@@ -33,7 +29,6 @@ import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.MessageNode;
 import net.runelite.api.Player;
-import net.runelite.api.Skill;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.gameval.AnimationID;
@@ -148,18 +143,12 @@ public class BingoPlugin extends Plugin
 	 */
 	private final Map<Integer, List<BoardResponse.Tile>> tilesByItemId = new ConcurrentHashMap<>();
 
-	/** Lowercased skill name -> the team-xp tile watching it. */
-	private volatile Map<String, BoardResponse.Tile> xpTilesBySkill = Collections.emptyMap();
-
-	/** Lowercased boss name -> the team-kc tile watching it. */
-	private volatile Map<String, BoardResponse.Tile> kcTilesByBoss = Collections.emptyMap();
-
 	/**
-	 * Submissions (drop proofs and kc/xp readings) that failed to send over
-	 * the network, waiting to retry. Backed by PendingSubmissionStore, which
-	 * mirrors every entry to disk — startUp() reloads whatever survived a
-	 * previous session, so a client restart mid-outage no longer silently
-	 * loses a real drop with no way to reconstruct it afterwards.
+	 * Drop proofs that failed to send over the network, waiting to retry.
+	 * Backed by PendingSubmissionStore, which mirrors every entry to disk —
+	 * startUp() reloads whatever survived a previous session, so a client
+	 * restart mid-outage no longer silently loses a real drop with no way
+	 * to reconstruct it afterwards.
 	 */
 	private final Deque<PendingSubmissionStore.PendingItem> retryQueue = new ConcurrentLinkedDeque<>();
 
@@ -197,41 +186,6 @@ public class BingoPlugin extends Plugin
 	// cache is keyed on tile id alone with no idea whether a later hit is a
 	// genuine new kill or the same kill's duplicate event.
 	private static final long DEDUPE_WINDOW_MILLIS = 1200L;
-
-	/**
-	 * Debounce buffer for kc chat-line reports: goalKey -> latest absolute kc
-	 * seen. Without this, a kill streak on a tracked boss fires one
-	 * report-and-refresh per kill. Since reportProgress only ever cares about
-	 * the newest absolute value (the server takes the max, same as the xp
-	 * path), buffering and sending the latest value once the streak goes
-	 * quiet is a pure win — same end result, far fewer requests.
-	 *
-	 * <p>Guarded by kcPushLock rather than made a ConcurrentHashMap: a plain
-	 * "copy the map, then clear it" drain (which is what flushing needs) is
-	 * two separate operations even on a concurrent map, and a put() landing
-	 * from the client thread in the gap between those two operations would
-	 * be silently wiped by the clear() — a genuinely lost kc update, not
-	 * just a delayed one. For a bingo where accuracy decides the winner,
-	 * that's not an acceptable trade for a debounce. The lock makes "put a
-	 * value" and "drain everything" fully mutually exclusive instead, at
-	 * the cost of a lock held only across a map put or a copy-and-clear —
-	 * both microseconds, and kc chat lines are human-paced, not a hot loop.
-	 */
-	private final Object kcPushLock = new Object();
-	private final Map<String, Long> pendingKcPush = new HashMap<>();
-	private volatile ScheduledFuture<?> kcPushTask;
-	private static final long KC_PUSH_COALESCE_MILLIS = TimeUnit.SECONDS.toMillis(15);
-
-	/**
-	 * Matches OSRS's generic "kill count" family of chat messages ("Your
-	 * Zulrah kill count is: 50.", "...completion count for...", "...lap
-	 * count is:...", etc). Mirrors KILLCOUNT_PATTERN in RuneLite's own
-	 * bundled ChatCommandsPlugin.
-	 */
-	private static final Pattern KILLCOUNT_PATTERN = Pattern.compile(
-		"Your (?<pre>completion count for |subdued |completed )?(?:<col=[0-9a-f]{6}>)?(?<boss>.+?)(?:</col>)? "
-			+ "(?<post>(?:(?:kill|harvest|lap|completion|success|Total Ticket) )?(?:count )?)"
-			+ "is: ?<col=[0-9a-f]{6}>(?<kc>[0-9,]+)</col>");
 
 	private boolean recentlyAttempted(String tileId)
 	{
@@ -321,21 +275,9 @@ public class BingoPlugin extends Plugin
 		chatCommandManager.unregisterCommand(LIVE_COMMAND);
 		clientToolbar.removeNavigation(bingoNavButton);
 		bingoPanel.dispose();
-		ScheduledFuture<?> pendingFlush = kcPushTask;
-		if (pendingFlush != null)
-		{
-			pendingFlush.cancel(false);
-		}
-		synchronized (kcPushLock)
-		{
-			pendingKcPush.clear();
-		}
 		tilesByItemId.clear();
 		recentAttempts.clear();
 		retryQueue.clear();
-		warnedUnrecognisedSkills.clear();
-		xpTilesBySkill = Collections.emptyMap();
-		kcTilesByBoss = Collections.emptyMap();
 		previouslyLiveUsernames = null;
 		checkedRuneProfileSync = false;
 	}
@@ -362,12 +304,12 @@ public class BingoPlugin extends Plugin
 
 	/**
 	 * Tiles get completed by teammates too, so the local copy (item ids to
-	 * watch for, xp/kc tiles to report to) goes stale on its own even when
-	 * this client sees no drops. A minute is frequent enough to stay
-	 * reasonably current for a small clan without hammering the API; this
-	 * player's own actions (see the refreshBoard() calls after a successful
-	 * submit/report below) update instantly regardless. Also drains the
-	 * retry queue — no need for a separate, faster schedule for that.
+	 * watch for) goes stale on its own even when this client sees no drops.
+	 * A minute is frequent enough to stay reasonably current for a small
+	 * clan without hammering the API; this player's own actions (see the
+	 * refreshBoard() calls after a successful submit below) update instantly
+	 * regardless. Also drains the retry queue — no need for a separate,
+	 * faster schedule for that.
 	 */
 	@Schedule(period = 1, unit = ChronoUnit.MINUTES, asynchronous = true)
 	public void scheduledRefresh()
@@ -378,6 +320,13 @@ public class BingoPlugin extends Plugin
 		checkBroadcast();
 	}
 
+	/**
+	 * Fetches the board and rebuilds the item-id lookup that handleLoot()
+	 * checks drops against. Team-combined xp/kc tiles need no plugin-side
+	 * reporting at all — their progress comes entirely from the website's
+	 * own hiscores polling (see osrsclan/api/_lib/board.ts), so this only
+	 * ever has to watch for item drops.
+	 */
 	private void refreshBoard()
 	{
 		String apiKey = config.apiKey().trim();
@@ -385,8 +334,6 @@ public class BingoPlugin extends Plugin
 		{
 			tilesByItemId.clear();
 			recentAttempts.clear();
-			xpTilesBySkill = Collections.emptyMap();
-			kcTilesByBoss = Collections.emptyMap();
 			SwingUtilities.invokeLater(bingoPanel::showNoApiKey);
 			return;
 		}
@@ -400,261 +347,23 @@ public class BingoPlugin extends Plugin
 				List<BoardResponse.Tile> tiles = myTeam == null ? Collections.emptyList() : myTeam.getTiles();
 
 				Map<Integer, List<BoardResponse.Tile>> nextItemLookup = new HashMap<>();
-				Map<String, BoardResponse.Tile> nextXpTiles = new HashMap<>();
-				Map<String, BoardResponse.Tile> nextKcTiles = new HashMap<>();
 				for (BoardResponse.Tile tile : tiles)
 				{
-					if (tile.isXpGoal())
+					if (tile.isXpGoal() || tile.isKcGoal())
 					{
-						nextXpTiles.put(tile.goalKey.trim().toLowerCase(), tile);
+						continue;
 					}
-					else if (tile.isKcGoal())
+					for (Integer itemId : tile.getItemIds())
 					{
-						nextKcTiles.put(tile.goalKey.trim().toLowerCase(), tile);
-					}
-					else
-					{
-						for (Integer itemId : tile.getItemIds())
-						{
-							nextItemLookup.computeIfAbsent(itemId, id -> new ArrayList<>()).add(tile);
-						}
+						nextItemLookup.computeIfAbsent(itemId, id -> new ArrayList<>()).add(tile);
 					}
 				}
 
 				tilesByItemId.clear();
 				tilesByItemId.putAll(nextItemLookup);
-				xpTilesBySkill = nextXpTiles;
-				kcTilesByBoss = nextKcTiles;
-				reportXpProgress(apiKey, nextXpTiles);
-				log.debug("Bingo board refreshed: watching {} item ids, {} xp tiles, {} kc tiles",
-					nextItemLookup.size(), nextXpTiles.size(), nextKcTiles.size());
+				log.debug("Bingo board refreshed: watching {} item ids", nextItemLookup.size());
 			},
 			error -> log.debug("Bingo board refresh failed: {}", error));
-	}
-
-	/** goalKeys we've already warned about once, so a bad tile doesn't spam chat every refresh. */
-	private final Set<String> warnedUnrecognisedSkills = ConcurrentHashMap.newKeySet();
-
-	/**
-	 * Reads this player's current xp for every skill an active team-xp tile
-	 * watches and reports it. Safe to call on every refresh — the server
-	 * tracks each member's own baseline and only a rising reading ever moves
-	 * the team total, so re-reporting the same or a lower value is a no-op.
-	 */
-	private void reportXpProgress(String apiKey, Map<String, BoardResponse.Tile> xpTiles)
-	{
-		if (xpTiles.isEmpty())
-		{
-			return;
-		}
-
-		clientThread.invokeLater(() -> {
-			// Guards against a real correctness bug: startUp() calls
-			// refreshBoard() unconditionally, which can happen before a
-			// character is even loaded (e.g. still on the login screen).
-			// getSkillExperience() would read 0 in that case, and since a
-			// player's *first-ever* report becomes their permanent
-			// baseline server-side, that 0 would wrongly credit their
-			// entire lifetime xp in that skill to the tile. Skipping the
-			// whole cycle here is harmless — the next refresh after actual
-			// login (onGameStateChanged already triggers one) reports the
-			// real reading instead.
-			// GameState alone isn't quite enough: it can flip to LOGGED_IN a
-			// moment before the player/skill data behind it is actually
-			// populated (most likely right after a client restart), and
-			// getSkillExperience() reads 0 in that gap. Checking the local
-			// player exists too closes most of that window.
-			if (client.getGameState() != GameState.LOGGED_IN || client.getLocalPlayer() == null
-				|| client.getLocalPlayer().getName() == null)
-			{
-				return;
-			}
-
-			for (Map.Entry<String, BoardResponse.Tile> entry : xpTiles.entrySet())
-			{
-				Skill skill = skillFromName(entry.getKey());
-				if (skill == null)
-				{
-					continue;
-				}
-				long xp = client.getSkillExperience(skill);
-				if (xp <= 0)
-				{
-					// Belt-and-braces on top of the guard above: a 0 (or
-					// corrupt negative) reading becomes a PERMANENT baseline
-					// server-side if this is the first-ever report for this
-					// (player, skill) — recordGoalProgress never touches
-					// baseline_value again after it's set. Skipping this one
-					// skill this cycle costs nothing (the next refresh tries
-					// again); reporting a bad 0 here would wrongly count the
-					// player's entire lifetime xp as "progress" forever,
-					// until someone notices and resets the whole board.
-					continue;
-				}
-				BoardResponse.Tile tile = entry.getValue();
-				// No refreshBoard() on success here, unlike the kc report
-				// below — this call is itself made from inside
-				// refreshBoard()'s own callback, so that would recurse
-				// forever. The next scheduled refresh picks up the new total.
-				reportGoalWithRetry(apiKey, "xp", tile.goalKey, xp);
-			}
-		});
-	}
-
-	/**
-	 * Reports one absolute kc/xp reading, persisting it to disk for retry if
-	 * the request can't reach the site at all. A rejection from the server
-	 * itself (as opposed to a transport failure) is never retried — same
-	 * "the server is the authority" principle the drop-proof retry already
-	 * follows.
-	 */
-	private void reportGoalWithRetry(String apiKey, String goalKind, String goalKey, long value)
-	{
-		api.reportProgress(apiKey, goalKind, goalKey, value,
-			() -> {},
-			error -> {
-				log.debug("Failed to report {} {}: {}", goalKind, goalKey, error);
-				if ("Could not reach the clan site".equals(error))
-				{
-					PendingSubmissionStore.PendingItem item = pendingStore.saveGoal(goalKind, goalKey, value);
-					if (item != null)
-					{
-						enqueueRetry(item);
-					}
-				}
-			});
-	}
-
-	/**
-	 * Matches a tile's goalKey against a real skill, tolerating the two
-	 * mismatches an admin is actually likely to type: the old "Runecrafting"
-	 * name (OSRS renamed it to "Runecraft") and the American "Defense"
-	 * spelling (OSRS uses "Defence"). Anything else that still doesn't match
-	 * gets a one-time chat warning instead of failing invisibly — a typo'd
-	 * skill name would otherwise silently never report, with the only trace
-	 * being a debug-level log line nobody sees.
-	 */
-	private Skill skillFromName(String name)
-	{
-		String normalized = name.trim().toLowerCase();
-		if ("runecrafting".equals(normalized))
-		{
-			normalized = "runecraft";
-		}
-		else if ("defense".equals(normalized))
-		{
-			normalized = "defence";
-		}
-
-		try
-		{
-			return Skill.valueOf(normalized.toUpperCase());
-		}
-		catch (IllegalArgumentException e)
-		{
-			if (warnedUnrecognisedSkills.add(normalized))
-			{
-				notifyPlayer("\"" + name + "\" on your team's board isn't a real skill name — ask an admin to fix that tile.");
-			}
-			return null;
-		}
-	}
-
-	@Subscribe
-	public void onChatMessage(ChatMessage chatMessage)
-	{
-		ChatMessageType type = chatMessage.getType();
-		if (type != ChatMessageType.TRADE && type != ChatMessageType.GAMEMESSAGE
-			&& type != ChatMessageType.SPAM && type != ChatMessageType.FRIENDSCHATNOTIFICATION)
-		{
-			return;
-		}
-
-		Map<String, BoardResponse.Tile> kcTiles = kcTilesByBoss;
-		if (kcTiles.isEmpty())
-		{
-			return;
-		}
-
-		Matcher matcher = KILLCOUNT_PATTERN.matcher(chatMessage.getMessage());
-		if (!matcher.find())
-		{
-			return;
-		}
-
-		BoardResponse.Tile tile = kcTiles.get(matcher.group("boss").trim().toLowerCase());
-		if (tile == null)
-		{
-			return;
-		}
-
-		long kc;
-		try
-		{
-			kc = Long.parseLong(matcher.group("kc").replace(",", ""));
-		}
-		catch (NumberFormatException e)
-		{
-			return;
-		}
-
-		if (config.apiKey().trim().isEmpty())
-		{
-			return;
-		}
-		// Buffered rather than sent immediately — see pendingKcPush. A kill
-		// streak on the same boss just keeps overwriting this entry with the
-		// newest count until the streak goes quiet and scheduleKcPushFlush's
-		// task actually fires.
-		synchronized (kcPushLock)
-		{
-			pendingKcPush.put(tile.goalKey, kc);
-		}
-		scheduleKcPushFlush();
-	}
-
-	/**
-	 * (Re)schedules the kc-push flush, cancelling any pending one first —
-	 * classic debounce: the flush only actually runs once KC_PUSH_COALESCE_MILLIS
-	 * passes with no further kc ticks. A rapid kill streak keeps pushing the
-	 * schedule back, so it collapses to one flush (and one refresh) for the
-	 * whole streak instead of one per kill.
-	 */
-	private void scheduleKcPushFlush()
-	{
-		ScheduledFuture<?> existing = kcPushTask;
-		if (existing != null)
-		{
-			existing.cancel(false);
-		}
-		kcPushTask = executor.schedule(this::flushKcPush, KC_PUSH_COALESCE_MILLIS, TimeUnit.MILLISECONDS);
-	}
-
-	/** Sends every buffered kc reading, then refreshes once for the whole batch. */
-	private void flushKcPush()
-	{
-		String apiKey = config.apiKey().trim();
-
-		Map<String, Long> toSend;
-		synchronized (kcPushLock)
-		{
-			if (apiKey.isEmpty() || pendingKcPush.isEmpty())
-			{
-				pendingKcPush.clear();
-				return;
-			}
-			toSend = new HashMap<>(pendingKcPush);
-			pendingKcPush.clear();
-		}
-
-		for (Map.Entry<String, Long> entry : toSend.entrySet())
-		{
-			reportGoalWithRetry(apiKey, "kc", entry.getKey(), entry.getValue());
-		}
-		// One refresh for the whole flushed batch, not one per boss — mirrors
-		// the same "your own action updates instantly" pattern the drop path
-		// uses, just coalesced the way the pushes themselves now are.
-		refreshBoard();
 	}
 
 	@Subscribe
@@ -763,9 +472,9 @@ public class BingoPlugin extends Plugin
 			() -> onSubmitted(itemName, tile.name),
 			error -> {
 				// A transport failure is worth retrying — both immediately on
-				// the next matching drop (the 30s dedupe window, not "forever",
-				// is what lets a genuine re-drop after a later admin rejection
-				// go through) and via the retry queue in case no further drop
+				// the next matching drop (the dedupe window, not "forever", is
+				// what lets a genuine re-drop after a later admin rejection go
+				// through) and via the retry queue in case no further drop
 				// ever comes. A rejection from the server is neither.
 				if ("Could not reach the clan site".equals(error))
 				{
@@ -806,14 +515,7 @@ public class BingoPlugin extends Plugin
 		PendingSubmissionStore.PendingItem item;
 		while ((item = retryQueue.poll()) != null)
 		{
-			if (item.isGoal())
-			{
-				retryGoalItem(apiKey, item);
-			}
-			else
-			{
-				retryProofItem(apiKey, item);
-			}
+			retryProofItem(apiKey, item);
 		}
 	}
 
@@ -846,26 +548,6 @@ public class BingoPlugin extends Plugin
 				{
 					pendingStore.remove(item);
 					notifyPlayer(item.itemName + " not submitted — " + error);
-				}
-			});
-	}
-
-	private void retryGoalItem(String apiKey, PendingSubmissionStore.PendingItem item)
-	{
-		api.reportProgress(apiKey, item.goalKind, item.goalKey, item.goalValue,
-			() -> {
-				pendingStore.remove(item);
-				refreshBoard();
-			},
-			error -> {
-				if ("Could not reach the clan site".equals(error))
-				{
-					enqueueRetry(item);
-				}
-				else
-				{
-					pendingStore.remove(item);
-					log.debug("Dropped queued {} report for {}: {}", item.goalKind, item.goalKey, error);
 				}
 			});
 	}
