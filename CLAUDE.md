@@ -7,6 +7,48 @@ site at `https://timeserved.vercel.app` (companion repo: `osrsclan`, same
 parent folder) via `BingoApiClient`, authenticated with a plugin key pasted
 into config (`BingoConfig.apiKey()`).
 
+## Reference plugin: Anvil
+
+A more mature, unrelated clan's plugin (`github.com/AhmedFathy2001/anvil-plugin`
+— cloned as a sibling folder `../anvil-plugin` during this session for
+comparison; re-clone it there if it's not present on this machine) was used
+as a comparison point for "how do other clan-bingo plugins handle X" — it's a
+generalized, multi-tenant "clan-operations platform" plugin (~26k lines,
+white-label, any clan can point it at their own backend), a much bigger
+scope than this plugin is trying to be. It is **not** a dependency and
+can't be pointed at our site — its wire protocol (~25 `/api/plugin/*`
+endpoints, a completely different data model built around "events" with
+points/tiers/reveal-modes) is specific to its own backend, which we don't
+run and have no access to.
+
+Ideas actually adapted from it into this plugin (same principle, rewritten
+to fit our own schema/auth, not copied code):
+- KC/XP push debouncing (coalesce a kill streak into one request).
+- Treating hiscores as a correcting backstop rather than the only source of
+  truth for XP/KC (see `osrsclan`'s `reconcileGoalProgress`).
+- Disk-persisted retry queue for failed submissions (`PendingSubmissionStore`).
+- The idea of a verification code/timestamp baked into proof screenshots
+  (though the *mechanism* ended up different from Anvil's — see below).
+
+**Explicitly declined**, so don't re-suggest these without a fresh
+conversation about scope — they were discussed and deliberately ruled out,
+not overlooked: Combat Achievement / diary / timed-clear / item-gain /
+loot-value tile types, weekly SotW/BotW competitions, multi-clan
+federation, drop-luck statistics, OBS replay clips, a points/tiers/reveal-
+mode scoring system, and Anvil's device-code Discord sign-in flow (the
+existing pasted-plugin-key model is intentionally simpler and considered
+sufficient for this clan's size).
+
+## Scope / design philosophy
+
+This is deliberately a **small, single-clan tool**, not a platform —
+hardcoded to `timeserved.vercel.app`, no multi-tenant config, no ambition
+to become Anvil. Bingo tiles are staying to exactly three kinds on
+purpose: **item drops, team-combined boss KC, team-combined skill XP**.
+That's a considered decision (see the Anvil section above), not a
+temporary starting point — don't propose expanding tile types as a
+"quick win" without checking first.
+
 ## Current branch: `improvement/bingo-tracking`
 
 This branch is not merged to `main` yet — it's out for review as
