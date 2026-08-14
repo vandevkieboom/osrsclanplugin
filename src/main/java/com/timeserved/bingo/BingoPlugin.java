@@ -221,7 +221,17 @@ public class BingoPlugin extends Plugin
 	 * until the next board refresh.
 	 */
 	private final Map<String, Long> recentAttempts = new ConcurrentHashMap<>();
-	private static final long DEDUPE_WINDOW_MILLIS = TimeUnit.SECONDS.toMillis(30);
+	// 2 game ticks (a tick is 600ms) — comfortably longer than the gap between
+	// NpcLootReceived and LootReceived firing for the SAME kill (they land in
+	// the same tick, or very close), but short enough that genuinely separate
+	// kills seconds apart are never mistaken for duplicates. This used to be
+	// 30 seconds, which was a real bug: rapid-killing a fast-dying, fast-
+	// respawning monster (e.g. farming bones from something weak) meant only
+	// the FIRST kill in any 30-second span ever got submitted — every other
+	// real, separate kill in that window was silently dropped, since this
+	// cache is keyed on tile id alone with no idea whether a later hit is a
+	// genuine new kill or the same kill's duplicate event.
+	private static final long DEDUPE_WINDOW_MILLIS = 1200L;
 
 	/**
 	 * Debounce buffer for kc chat-line reports: goalKey -> latest absolute kc
@@ -968,7 +978,7 @@ public class BingoPlugin extends Plugin
 	{
 		notifyPlayer("Submitted " + itemName + " for tile \"" + tileName + "\"");
 		bingoPanel.notifyAutoSubmitted(itemName);
-		progressBanner.show("Bingo proof submitted", itemName + " — " + tileName);
+		progressBanner.show(itemName, tileName);
 		refreshBoard();
 	}
 
