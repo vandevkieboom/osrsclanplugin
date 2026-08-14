@@ -36,10 +36,14 @@ import net.runelite.api.Player;
 import net.runelite.api.Skill;
 import net.runelite.api.TileItem;
 import net.runelite.api.coords.LocalPoint;
+import net.runelite.api.ScriptID;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.ItemDespawned;
 import net.runelite.api.events.ItemSpawned;
+import net.runelite.api.events.ScriptPostFired;
+import net.runelite.api.events.WidgetClosed;
+import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.gameval.AnimationID;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.chat.ChatCommandManager;
@@ -102,6 +106,9 @@ public class BingoPlugin extends Plugin
 
 	@Inject
 	private BingoProgressBanner progressBanner;
+
+	@Inject
+	private BingoClogTabController clogTabController;
 
 	@Inject
 	private ChatCommandManager chatCommandManager;
@@ -716,6 +723,27 @@ public class BingoPlugin extends Plugin
 		if (tracked != null)
 		{
 			tracked.beam.remove();
+		}
+	}
+
+	@Subscribe
+	public void onWidgetLoaded(WidgetLoaded event)
+	{
+		clogTabController.onWidgetLoaded(event.getGroupId());
+	}
+
+	@Subscribe
+	public void onWidgetClosed(WidgetClosed event)
+	{
+		clogTabController.onWidgetClosed(event.getGroupId());
+	}
+
+	@Subscribe
+	public void onScriptPostFired(ScriptPostFired event)
+	{
+		if (event.getScriptId() == ScriptID.COLLECTION_DRAW_LIST)
+		{
+			clogTabController.onCollectionDrawList();
 		}
 	}
 
