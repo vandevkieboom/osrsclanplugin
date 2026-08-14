@@ -133,21 +133,9 @@ public interface BingoConfig extends Config
 	}
 
 	@ConfigItem(
-		keyName = "highlightGroundItems",
-		name = "Highlight bingo drops",
-		description = "Configure whether to show lootbeams for bingo drops.",
-		section = bingoSection,
-		position = 10
-	)
-	default boolean highlightGroundItems()
-	{
-		return true;
-	}
-
-	@ConfigItem(
 		keyName = "showVerificationOverlay",
-		name = "Verification overlay",
-		description = "Show the verification code and a live timestamp, so it's baked into every proof screenshot.",
+		name = "Codeword overlay",
+		description = "Show the codeword and a live timestamp, so it's baked into every proof screenshot.",
 		section = bingoSection,
 		position = 12
 	)
@@ -158,26 +146,13 @@ public interface BingoConfig extends Config
 
 	@ConfigItem(
 		keyName = "verificationCode",
-		name = "Verification code",
-		description = "Whatever code your clan admin announced for the current event (e.g. in Discord) — not fetched from the site, just typed in here.",
+		name = "Codeword",
+		description = "Whatever code your clan admin announced for the current event.",
 		section = bingoSection,
 		position = 13
 	)
 	default String verificationCode()
 	{
 		return "";
-	}
-
-	@Alpha
-	@ConfigItem(
-		keyName = "groundItemHighlightColor",
-		name = "Highlight color",
-		description = "Configure the color of lootbeams for bingo drops.",
-		section = bingoSection,
-		position = 11
-	)
-	default Color groundItemHighlightColor()
-	{
-		return new Color(255, 215, 0, 180);
 	}
 }

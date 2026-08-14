@@ -34,16 +34,8 @@ import net.runelite.api.GameState;
 import net.runelite.api.MessageNode;
 import net.runelite.api.Player;
 import net.runelite.api.Skill;
-import net.runelite.api.TileItem;
-import net.runelite.api.coords.LocalPoint;
-import net.runelite.api.ScriptID;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameStateChanged;
-import net.runelite.api.events.ItemDespawned;
-import net.runelite.api.events.ItemSpawned;
-import net.runelite.api.events.ScriptPostFired;
-import net.runelite.api.events.WidgetClosed;
-import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.gameval.AnimationID;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.chat.ChatCommandManager;
@@ -99,16 +91,7 @@ public class BingoPlugin extends Plugin
 	private OverlayManager overlayManager;
 
 	@Inject
-	private BingoGroundItemsOverlay groundItemsOverlay;
-
-	@Inject
 	private BingoVerificationOverlay verificationOverlay;
-
-	@Inject
-	private BingoProgressBanner progressBanner;
-
-	@Inject
-	private BingoClogTabController clogTabController;
 
 	@Inject
 	private ChatCommandManager chatCommandManager;
@@ -170,24 +153,6 @@ public class BingoPlugin extends Plugin
 
 	/** Lowercased boss name -> the team-kc tile watching it. */
 	private volatile Map<String, BoardResponse.Tile> kcTilesByBoss = Collections.emptyMap();
-
-	/** Ground items currently visible whose id satisfies an outstanding tile. */
-	private final Map<TileItem, TrackedGroundItem> trackedGroundItems = new ConcurrentHashMap<>();
-
-	/** A tracked ground item's real 3D loot beam, plus what to label it with. */
-	static class TrackedGroundItem
-	{
-		final LocalPoint location;
-		final String tileName;
-		final BingoLootbeam beam;
-
-		TrackedGroundItem(LocalPoint location, String tileName, BingoLootbeam beam)
-		{
-			this.location = location;
-			this.tileName = tileName;
-			this.beam = beam;
-		}
-	}
 
 	/**
 	 * Submissions (drop proofs and kc/xp readings) that failed to send over
@@ -294,9 +259,7 @@ public class BingoPlugin extends Plugin
 	@Override
 	protected void startUp()
 	{
-		overlayManager.add(groundItemsOverlay);
 		overlayManager.add(verificationOverlay);
-		overlayManager.add(progressBanner);
 		chatCommandManager.registerCommandAsync(VERIFY_COMMAND, this::onRankCommand);
 		chatCommandManager.registerCommandAsync(NEEDED_COMMAND, this::onNeededCommand);
 		chatCommandManager.registerCommandAsync(LIVE_COMMAND, this::onLiveCommand);
@@ -352,9 +315,7 @@ public class BingoPlugin extends Plugin
 	@Override
 	protected void shutDown()
 	{
-		overlayManager.remove(groundItemsOverlay);
 		overlayManager.remove(verificationOverlay);
-		overlayManager.remove(progressBanner);
 		chatCommandManager.unregisterCommand(VERIFY_COMMAND);
 		chatCommandManager.unregisterCommand(NEEDED_COMMAND);
 		chatCommandManager.unregisterCommand(LIVE_COMMAND);
@@ -371,22 +332,12 @@ public class BingoPlugin extends Plugin
 		}
 		tilesByItemId.clear();
 		recentAttempts.clear();
-		for (TrackedGroundItem tracked : trackedGroundItems.values())
-		{
-			tracked.beam.remove();
-		}
-		trackedGroundItems.clear();
 		retryQueue.clear();
 		warnedUnrecognisedSkills.clear();
 		xpTilesBySkill = Collections.emptyMap();
 		kcTilesByBoss = Collections.emptyMap();
 		previouslyLiveUsernames = null;
 		checkedRuneProfileSync = false;
-	}
-
-	Map<TileItem, TrackedGroundItem> getTrackedGroundItems()
-	{
-		return trackedGroundItems;
 	}
 
 	@Subscribe
@@ -707,57 +658,6 @@ public class BingoPlugin extends Plugin
 	}
 
 	@Subscribe
-	public void onItemSpawned(ItemSpawned event)
-	{
-		if (!config.highlightGroundItems())
-		{
-			return;
-		}
-		List<BoardResponse.Tile> candidates = tilesByItemId.get(event.getItem().getId());
-		if (candidates == null || candidates.isEmpty())
-		{
-			return;
-		}
-
-		BingoLootbeam beam = new BingoLootbeam(
-			client, clientThread, event.getTile().getWorldLocation(),
-			config.groundItemHighlightColor(), BingoLootbeam.Style.MODERN);
-		trackedGroundItems.put(event.getItem(),
-			new TrackedGroundItem(event.getTile().getLocalLocation(), candidates.get(0).name, beam));
-	}
-
-	@Subscribe
-	public void onItemDespawned(ItemDespawned event)
-	{
-		TrackedGroundItem tracked = trackedGroundItems.remove(event.getItem());
-		if (tracked != null)
-		{
-			tracked.beam.remove();
-		}
-	}
-
-	@Subscribe
-	public void onWidgetLoaded(WidgetLoaded event)
-	{
-		clogTabController.onWidgetLoaded(event.getGroupId());
-	}
-
-	@Subscribe
-	public void onWidgetClosed(WidgetClosed event)
-	{
-		clogTabController.onWidgetClosed(event.getGroupId());
-	}
-
-	@Subscribe
-	public void onScriptPostFired(ScriptPostFired event)
-	{
-		if (event.getScriptId() == ScriptID.COLLECTION_DRAW_LIST)
-		{
-			clogTabController.onCollectionDrawList();
-		}
-	}
-
-	@Subscribe
 	public void onNpcLootReceived(NpcLootReceived event)
 	{
 		handleLoot(event.getItems());
@@ -978,7 +878,6 @@ public class BingoPlugin extends Plugin
 	{
 		notifyPlayer("Submitted " + itemName + " for tile \"" + tileName + "\"");
 		bingoPanel.notifyAutoSubmitted(itemName);
-		progressBanner.show(itemName, tileName);
 		refreshBoard();
 	}
 
