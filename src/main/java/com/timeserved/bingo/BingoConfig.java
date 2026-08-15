@@ -167,4 +167,44 @@ public interface BingoConfig extends Config
 	{
 		return "";
 	}
+
+	@ConfigItem(
+		keyName = "showLiveCodewordOverlay",
+		name = "On-screen codeword overlay",
+		description = "Show the codeword and a live timestamp in a movable, resizable box on screen the whole"
+			+ " session, instead of only baking it into proof screenshots. Drag it to move, drag a corner to"
+			+ " resize (squish it into a thin strip to save screen space).",
+		section = bingoSection,
+		position = 14
+	)
+	default boolean showLiveCodewordOverlay()
+	{
+		return false;
+	}
+
+	@Alpha
+	@ConfigItem(
+		keyName = "codewordColor",
+		name = "Codeword color",
+		description = "Configure the color of the codeword text in the on-screen codeword overlay.",
+		section = bingoSection,
+		position = 15
+	)
+	default Color codewordColor()
+	{
+		return new Color(0x00FF6A);
+	}
+
+	@Alpha
+	@ConfigItem(
+		keyName = "timestampColor",
+		name = "Timestamp color",
+		description = "Configure the color of the timestamp text in the on-screen codeword overlay.",
+		section = bingoSection,
+		position = 16
+	)
+	default Color timestampColor()
+	{
+		return new Color(0xFFFFFFFF, true);
+	}
 }

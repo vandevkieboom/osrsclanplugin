@@ -149,6 +149,93 @@ mode scoring system, and Anvil's device-code Discord sign-in flow (the
 existing pasted-plugin-key model is intentionally simpler and considered
 sufficient for this clan's size).
 
+## On-screen codeword overlay (`BingoCodewordOverlay`, new file)
+
+A second, separate overlay from `BingoVerificationOverlay` — that one only
+ever renders for the single frame `drawManager` captures (baked into proof
+screenshots, never actually visible during play). This one is the opposite:
+a persistent, player-draggable/resizable overlay showing the same codeword
++ live UTC timestamp, on screen the whole session. Gated independently by
+`BingoConfig.showLiveCodewordOverlay()` (default off) — both overlays can be
+on at once, or either alone.
+
+The ask was to match the Wise Old Man RuneLite plugin's on-screen overlay
+"exactly." Four rounds were spent guessing the styling/behavior from
+screenshots alone before actually going and getting the real source —
+worth recording so this isn't repeated:
+1. First pass drew a dark rounded panel + border with custom `Graphics2D`
+   paint code, guessing from screenshots.
+2. Second pass **removed** the panel/border entirely, wrongly guessing the
+   box outline in round 1's screenshots was RuneLite's overlay-edit-mode
+   selection outline rather than real styling.
+3. User confirmed the panel/border is real; reinstated with custom paint
+   code, then went through a font-shrink-to-fit attempt and a manual
+   token/line-wrap attempt, both guessed independently rather than sourced
+   — the user explicitly said the font-shrink version "is terrible" and
+   asked to revert to the plain-clipping version rather than keep either.
+4. **User then asked directly: go check the actual WOM plugin's source.**
+   `wise-old-man-master` in this same parent folder turned out to be the
+   WOM **website** (Next.js monorepo), not the plugin — that's a different
+   repo, `wise-old-man/wiseoldman-runelite-plugin` on GitHub, not present
+   on this machine, found via `WebSearch` and cloned fresh into the scratch
+   directory to read its actual overlay class:
+   `net/wiseoldman/ui/CodeWordOverlay.java`.
+
+**What WOM's real overlay does — and what this port now mirrors exactly**
+(no more guessing from screenshots): it's not custom paint code at all.
+`CodeWordOverlay extends OverlayPanel` (not raw `Overlay`), and `render()`
+just adds one `net.runelite.client.ui.overlay.components.LineComponent` —
+`.left(codeword).leftColor(...).right(formattedTimestamp).rightColor(...)`
+— to `panelComponent.getChildren()`, then calls `super.render(graphics)`.
+Every behavior the screenshots showed comes from RuneLite's own components,
+not anything WOM (or this plugin) built:
+- `OverlayPanel`'s constructor already calls `setResizable(true)` and its
+  `render()` renders the dark panel background + two-tone border stroke
+  automatically (`BackgroundComponent`, derived from the panel's background
+  color — no border color to configure separately, it's computed from the
+  fill color).
+- `LineComponent.render()` is where "sticky to the right, one line when
+  wide, wraps into extra lines when narrow" actually lives (RuneLite core,
+  `net.runelite.client.ui.overlay.components.LineComponent`): if
+  `left + right` text combined is narrower than the panel's current dragged
+  width, it's one row, left text at the left edge, right text right-aligned
+  to the panel's right edge. Once it doesn't fit, the right side gets
+  roughly 1/3 of the panel width as a word-wrap budget and breaks onto as
+  many additional right-aligned lines as needed (word by word, so
+  `"15/08/2026 19:11 UTC"` can end up as three separate lines) while the
+  left side keeps its own line(s) — this is exactly why the codeword can
+  share a row with the date but the time/"UTC" drop to their own rows once
+  the panel's too narrow. Panel height then just naturally follows however
+  many lines that produced.
+- Timestamp format is `DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm 'UTC'")`
+  — copied verbatim from WOM's `FORMATTER` constant.
+- `config.codewordColor()`/`config.timestampColor()` default to WOM's own
+  defaults too: `new Color(0x00FF6A)` (green) and `new Color(0xFFFFFF)`
+  (white), copied from `WomUtilsConfig`.
+- Position: `OverlayPosition.ABOVE_CHATBOX_RIGHT` + `setPriority(PRIORITY_LOW)`,
+  matching WOM's constructor exactly — this is just a starting anchor, the
+  position is still freely draggable anywhere (RuneLite's default
+  movable/snappable behavior for any non-`DYNAMIC`/`DETACHED`/`TOOLTIP`
+  position).
+
+**Current `BingoCodewordOverlay` is now a direct, faithful, verified port**
+— not a guess. If it ever looks or behaves differently from real WOM again,
+the fix is almost certainly "make it match `CodeWordOverlay`/`LineComponent`
+more closely," not another from-scratch paint-code attempt. The earlier
+custom-paint versions (rounded rect, manual token wrapping, font-shrinking)
+are gone; don't reintroduce that approach without a concrete reason WOM's
+own component-based approach doesn't work here.
+
+`BingoVerificationOverlay`'s burn-in colors are intentionally left as
+hardcoded `Color.WHITE`/`Color.LIGHT_GRAY` — wasn't asked to change that
+one, so left alone.
+
+Not yet manually tested in a running client (compiles clean via
+`./gradlew compileJava` — see "What to actually test" below to add: set a
+codeword, enable the new toggle, confirm it renders, drag it wide (one
+line, codeword left/timestamp right) and narrow (wraps into extra lines),
+restart the client and confirm position/size/enabled state all persisted).
+
 ## Scope / design philosophy
 
 This is deliberately a **small, single-clan tool**, not a platform —

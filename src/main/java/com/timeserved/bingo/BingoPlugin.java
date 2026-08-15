@@ -89,6 +89,9 @@ public class BingoPlugin extends Plugin
 	private BingoVerificationOverlay verificationOverlay;
 
 	@Inject
+	private BingoCodewordOverlay codewordOverlay;
+
+	@Inject
 	private ChatCommandManager chatCommandManager;
 
 	@Inject
@@ -225,6 +228,7 @@ public class BingoPlugin extends Plugin
 	protected void startUp()
 	{
 		overlayManager.add(verificationOverlay);
+		overlayManager.add(codewordOverlay);
 		chatCommandManager.registerCommandAsync(VERIFY_COMMAND, this::onRankCommand);
 		chatCommandManager.registerCommandAsync(NEEDED_COMMAND, this::onNeededCommand);
 		chatCommandManager.registerCommandAsync(LIVE_COMMAND, this::onLiveCommand);
@@ -284,6 +288,7 @@ public class BingoPlugin extends Plugin
 	protected void shutDown()
 	{
 		overlayManager.remove(verificationOverlay);
+		overlayManager.remove(codewordOverlay);
 		chatCommandManager.unregisterCommand(VERIFY_COMMAND);
 		chatCommandManager.unregisterCommand(NEEDED_COMMAND);
 		chatCommandManager.unregisterCommand(LIVE_COMMAND);
