@@ -96,6 +96,18 @@ public interface BingoConfig extends Config
 	String bingoSection = "bingo";
 
 	@ConfigItem(
+		keyName = "showSidebar",
+		name = "Show sidebar",
+		description = "Show the bingo board tab in the sidebar. Turn off to hide the icon entirely.",
+		section = bingoSection,
+		position = 6
+	)
+	default boolean showSidebar()
+	{
+		return true;
+	}
+
+	@ConfigItem(
 		keyName = "notifyOnSubmit",
 		name = "Notify on bingo submit",
 		description = "Post a chat message when bingo proof is submitted, or fails to submit.",

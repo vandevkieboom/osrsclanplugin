@@ -26,7 +26,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 import javax.imageio.ImageIO;
 import javax.inject.Inject;
 import javax.swing.BorderFactory;
@@ -57,7 +56,6 @@ public class BingoPanel extends PluginPanel
 	private static final Color GOOD = new Color(55, 240, 70);
 	private static final Color WARN = new Color(230, 150, 30);
 	private static final Color NEUTRAL_SWATCH = ColorScheme.MEDIUM_GRAY_COLOR;
-	private static final long TOAST_WINDOW_MILLIS = TimeUnit.MINUTES.toMillis(2);
 	private static final int LEADERBOARD_ROWS = 5;
 	private static final int TILE_SIZE = 30;
 	private static final int TILE_ICON_PX = 20;
@@ -83,8 +81,6 @@ public class BingoPanel extends PluginPanel
 	private final Timer statusTimer;
 
 	private volatile long lastSyncedAt;
-	private volatile String lastAutoSubmitItem;
-	private volatile long lastAutoSubmitAt;
 
 	@Inject
 	public BingoPanel(ScheduledExecutorService executor)
@@ -179,13 +175,6 @@ public class BingoPanel extends PluginPanel
 
 		content.add(buildLeaderboardSection(board));
 
-		JPanel toast = buildToast();
-		if (toast != null)
-		{
-			content.add(Box.createVerticalStrut(10));
-			content.add(toast);
-		}
-
 		content.add(Box.createVerticalStrut(6));
 		content.add(buildStatusLine());
 
@@ -202,17 +191,6 @@ public class BingoPanel extends PluginPanel
 			content.setVisible(true);
 			content.repaint();
 		});
-	}
-
-	/**
-	 * Call right after the plugin auto-submits a drop, so the sidebar shows the same confirmation the
-	 * chat message does. Doesn't repaint by itself — the caller (BingoPlugin#onSubmitted) always follows
-	 * an auto-submit with a board refresh anyway, which is what actually surfaces the toast.
-	 */
-	public void notifyAutoSubmitted(String itemName)
-	{
-		lastAutoSubmitItem = itemName;
-		lastAutoSubmitAt = System.currentTimeMillis();
 	}
 
 	// ---- header ------------------------------------------------------
@@ -237,10 +215,7 @@ public class BingoPanel extends PluginPanel
 		if (myTeam != null)
 		{
 			Color teamColor = parseColor(myTeam.accentColor, ColorScheme.BRAND_ORANGE);
-			JLabel dot = new JLabel("●");
-			dot.setFont(dot.getFont().deriveFont(8f));
-			dot.setForeground(teamColor);
-			metaRow.add(dot);
+			metaRow.add(colorChip(teamColor, 9));
 			metaRow.add(Box.createHorizontalStrut(5));
 
 			JLabel teamName = new JLabel(myTeam.name);
@@ -505,21 +480,17 @@ public class BingoPanel extends PluginPanel
 
 		JPanel nameRow = cappedRow();
 		nameRow.setOpaque(false);
-		JLabel swatch = new JLabel("■");
-		swatch.setFont(swatch.getFont().deriveFont(8f));
-		swatch.setForeground(teamColor);
-		nameRow.add(swatch);
-		nameRow.add(Box.createHorizontalStrut(5));
+		nameRow.add(colorChip(teamColor, 9));
+		nameRow.add(Box.createHorizontalStrut(6));
 		JLabel nameLabel = new JLabel(team.name);
 		nameLabel.setFont(FontManager.getRunescapeSmallFont().deriveFont(mine ? Font.BOLD : Font.PLAIN));
 		nameLabel.setForeground(mine ? Color.WHITE : ColorScheme.TEXT_COLOR);
 		nameRow.add(nameLabel);
 		middle.add(nameRow);
-		middle.add(Box.createVerticalStrut(3));
+		middle.add(Box.createVerticalStrut(4));
 
 		ProgressBar bar = new ProgressBar();
 		bar.setAlignmentX(Component.LEFT_ALIGNMENT);
-		bar.setPreferredSize(new Dimension(10, 4));
 		bar.setProgress(team.pct / 100.0, mine ? ColorScheme.BRAND_ORANGE : ColorScheme.MEDIUM_GRAY_COLOR);
 		middle.add(bar);
 
@@ -535,37 +506,7 @@ public class BingoPanel extends PluginPanel
 		return row;
 	}
 
-	// ---- toast + status --------------------------------------------------
-
-	/** Null when nothing was auto-submitted recently — the caller just omits the row entirely. */
-	private JPanel buildToast()
-	{
-		String item = lastAutoSubmitItem;
-		long at = lastAutoSubmitAt;
-		if (item == null || System.currentTimeMillis() - at > TOAST_WINDOW_MILLIS)
-		{
-			return null;
-		}
-
-		JPanel toast = capped(new BorderLayout(6, 0));
-		toast.setOpaque(true);
-		toast.setBackground(ColorScheme.DARKER_GRAY_COLOR);
-		toast.setBorder(BorderFactory.createCompoundBorder(
-			BorderFactory.createMatteBorder(0, 2, 0, 0, GOOD),
-			new EmptyBorder(6, 6, 6, 6)));
-
-		JLabel icon = new JLabel("⚒");
-		icon.setFont(icon.getFont().deriveFont(13f));
-		toast.add(icon, BorderLayout.WEST);
-
-		JLabel text = new JLabel("<html>" + escapeHtml(item) + " auto-detected — submitted</html>");
-		text.setFont(FontManager.getRunescapeSmallFont());
-		text.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
-		text.setBorder(new EmptyBorder(0, 6, 0, 0));
-		toast.add(text, BorderLayout.CENTER);
-
-		return toast;
-	}
+	// ---- status --------------------------------------------------
 
 	private JPanel buildStatusLine()
 	{
@@ -700,6 +641,32 @@ public class BingoPanel extends PluginPanel
 		return label;
 	}
 
+	/**
+	 * A small solid, rounded color swatch — used in place of a "■"/"●" text glyph for a team's accent
+	 * color. A painted shape renders crisply at any size; a glyph's actual visual weight varies by font
+	 * and rounds oddly at small sizes.
+	 */
+	private static JPanel colorChip(Color color, int size)
+	{
+		JPanel chip = new JPanel()
+		{
+			@Override
+			protected void paintComponent(Graphics g)
+			{
+				Graphics2D g2 = (Graphics2D) g.create();
+				g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+				g2.setColor(color);
+				g2.fillRoundRect(0, 0, getWidth(), getHeight(), 3, 3);
+				g2.dispose();
+			}
+		};
+		chip.setOpaque(false);
+		chip.setPreferredSize(new Dimension(size, size));
+		chip.setMaximumSize(new Dimension(size, size));
+		chip.setAlignmentX(Component.LEFT_ALIGNMENT);
+		return chip;
+	}
+
 	private static Color parseColor(String hex, Color fallback)
 	{
 		if (hex == null || hex.isEmpty())
@@ -749,11 +716,6 @@ public class BingoPanel extends PluginPanel
 		return String.valueOf(value);
 	}
 
-	private static String escapeHtml(String text)
-	{
-		return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
-	}
-
 	/**
 	 * A height-capped, left-aligned container so a BoxLayout parent can't stretch it — for layouts that
 	 * don't care which container they're attached to (BorderLayout, GridLayout). BoxLayout itself can't
@@ -801,7 +763,7 @@ public class BingoPanel extends PluginPanel
 		ProgressBar()
 		{
 			setOpaque(false);
-			setPreferredSize(new Dimension(10, 6));
+			setPreferredSize(new Dimension(10, 8));
 		}
 
 		void setProgress(double fraction, Color fillColor)

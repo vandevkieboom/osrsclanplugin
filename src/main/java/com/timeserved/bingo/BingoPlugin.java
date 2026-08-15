@@ -20,6 +20,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 import javax.imageio.ImageIO;
 import javax.inject.Inject;
 import javax.swing.SwingUtilities;
@@ -137,6 +138,29 @@ public class BingoPlugin extends Plugin
 	private boolean checkedRuneProfileSync;
 
 	/**
+	 * Whether the site last reported an active bingo event (see
+	 * BoardResponse.Config#bingoActive). Defaults true so this plugin polls
+	 * normally until it's actually heard otherwise — starts optimistic, not
+	 * paused, on a fresh session. Read by scheduledRefresh to decide whether
+	 * this tick's board check happens at all; see lastBoardCheckAt.
+	 */
+	private volatile boolean bingoActive = true;
+
+	/**
+	 * Wall-clock time of the last actual board-refresh attempt, regardless of
+	 * outcome. When bingoActive is false, maybeRefreshBoard skips most ticks
+	 * entirely rather than hitting the site every minute forever for an
+	 * event that isn't running — this plugin is a general clan tool (chat
+	 * commands, live-stream/broadcast notifications), not bingo-only, so
+	 * most installs would otherwise poll bingo endpoints year-round for no
+	 * reason. INACTIVE_BOARD_POLL_MILLIS still checks back occasionally so a
+	 * re-activated event is noticed without needing a client restart.
+	 */
+	private volatile long lastBoardCheckAt;
+
+	private static final long INACTIVE_BOARD_POLL_MILLIS = TimeUnit.MINUTES.toMillis(30);
+
+	/**
 	 * Item id -> the tiles it can satisfy, for this player's own team only.
 	 * Replaced wholesale on refresh; read from the client thread on every loot
 	 * event, so it's a concurrent map rather than a plain one.
@@ -224,7 +248,10 @@ public class BingoPlugin extends Plugin
 			.priority(5)
 			.panel(bingoPanel)
 			.build();
-		clientToolbar.addNavigation(bingoNavButton);
+		if (config.showSidebar())
+		{
+			clientToolbar.addNavigation(bingoNavButton);
+		}
 
 		List<PendingSubmissionStore.PendingItem> restored = pendingStore.loadAll();
 		if (!restored.isEmpty())
@@ -280,6 +307,8 @@ public class BingoPlugin extends Plugin
 		retryQueue.clear();
 		previouslyLiveUsernames = null;
 		checkedRuneProfileSync = false;
+		bingoActive = true;
+		lastBoardCheckAt = 0;
 	}
 
 	@Subscribe
@@ -296,28 +325,66 @@ public class BingoPlugin extends Plugin
 	@Subscribe
 	public void onConfigChanged(ConfigChanged event)
 	{
-		if (BingoConfig.GROUP.equals(event.getGroup()) && "apiKey".equals(event.getKey()))
+		if (!BingoConfig.GROUP.equals(event.getGroup()))
+		{
+			return;
+		}
+		if ("apiKey".equals(event.getKey()))
 		{
 			refreshBoard();
+		}
+		else if ("showSidebar".equals(event.getKey()))
+		{
+			if (config.showSidebar())
+			{
+				clientToolbar.addNavigation(bingoNavButton);
+			}
+			else
+			{
+				clientToolbar.removeNavigation(bingoNavButton);
+			}
 		}
 	}
 
 	/**
-	 * Tiles get completed by teammates too, so the local copy (item ids to
-	 * watch for) goes stale on its own even when this client sees no drops.
-	 * A minute is frequent enough to stay reasonably current for a small
-	 * clan without hammering the API; this player's own actions (see the
-	 * refreshBoard() calls after a successful submit below) update instantly
-	 * regardless. Also drains the retry queue — no need for a separate,
-	 * faster schedule for that.
+	 * Runs every minute for every plugin user, forever — this is a general
+	 * clan tool (chat commands, live-stream/broadcast notifications), not a
+	 * bingo-only one, so most installs run this whether or not a bingo event
+	 * even exists. checkLiveStreams/checkBroadcast stay on this 1-minute
+	 * cadence deliberately — going live or an admin broadcast are both
+	 * things worth surfacing promptly, and slowing those down to save a
+	 * trivial number of requests isn't a good trade. The actual saving
+	 * against the site's (free-tier) Vercel invocation quota comes from
+	 * maybeRefreshBoard below instead: the board-specific half backs off to
+	 * once per 30 minutes once the site reports no active bingo event,
+	 * rather than hitting that endpoint every minute for months between
+	 * events — a much bigger cut than slowing every check down would have
+	 * been, without costing anything on the checks people actually notice
+	 * the delay on.
 	 */
 	@Schedule(period = 1, unit = ChronoUnit.MINUTES, asynchronous = true)
 	public void scheduledRefresh()
 	{
-		refreshBoard();
-		retryPendingSubmissions();
+		maybeRefreshBoard();
 		checkLiveStreams();
 		checkBroadcast();
+	}
+
+	/**
+	 * Gates the board-specific work (board refresh + retry-queue drain)
+	 * behind bingoActive, unlike the always-on checks in scheduledRefresh.
+	 * Still checks back every INACTIVE_BOARD_POLL_MILLIS even while
+	 * inactive, purely so a re-activated event is picked up on its own
+	 * without needing a client restart.
+	 */
+	private void maybeRefreshBoard()
+	{
+		if (!bingoActive && System.currentTimeMillis() - lastBoardCheckAt < INACTIVE_BOARD_POLL_MILLIS)
+		{
+			return;
+		}
+		refreshBoard();
+		retryPendingSubmissions();
 	}
 
 	/**
@@ -326,6 +393,11 @@ public class BingoPlugin extends Plugin
 	 * reporting at all — their progress comes entirely from the website's
 	 * own hiscores polling (see osrsclan/api/_lib/board.ts), so this only
 	 * ever has to watch for item drops.
+	 *
+	 * <p>Called directly (bypassing maybeRefreshBoard's backoff) from
+	 * onGameStateChanged/onConfigChanged, so a login or a key change always
+	 * gets an immediate, real check rather than waiting out whatever's left
+	 * of the current backoff window.
 	 */
 	private void refreshBoard()
 	{
@@ -341,6 +413,9 @@ public class BingoPlugin extends Plugin
 		api.fetchBoard(
 			apiKey,
 			board -> {
+				lastBoardCheckAt = System.currentTimeMillis();
+				bingoActive = board.config == null || board.config.bingoActive == null || board.config.bingoActive;
+
 				SwingUtilities.invokeLater(() -> bingoPanel.refresh(board));
 
 				BoardResponse.Team myTeam = board.findMyTeam();
@@ -363,7 +438,14 @@ public class BingoPlugin extends Plugin
 				tilesByItemId.putAll(nextItemLookup);
 				log.debug("Bingo board refreshed: watching {} item ids", nextItemLookup.size());
 			},
-			error -> log.debug("Bingo board refresh failed: {}", error));
+			error -> {
+				// A transport/server failure tells us nothing about whether
+				// bingo is active — leave bingoActive as it was, but still
+				// bump lastBoardCheckAt so a prolonged outage doesn't turn
+				// into a tight retry loop on top of the real backoff.
+				lastBoardCheckAt = System.currentTimeMillis();
+				log.debug("Bingo board refresh failed: {}", error);
+			});
 	}
 
 	@Subscribe
@@ -552,14 +634,10 @@ public class BingoPlugin extends Plugin
 			});
 	}
 
-	/**
-	 * Common success path for a real proof landing: chat message, a note to the sidebar panel (so its
-	 * toast can show the same confirmation without needing to be watching chat), plus a refresh.
-	 */
+	/** Common success path for a real proof landing: chat message plus a board refresh. */
 	private void onSubmitted(String itemName, String tileName)
 	{
 		notifyPlayer("Submitted " + itemName + " for tile \"" + tileName + "\"");
-		bingoPanel.notifyAutoSubmitted(itemName);
 		refreshBoard();
 	}
 

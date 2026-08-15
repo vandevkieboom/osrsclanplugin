@@ -44,6 +44,63 @@ hiscores — see `osrsclan`'s `CLAUDE.md` for `seedGoalBaselines` /
 too, so there's no longer any path for a plugin (buggy or malicious) to
 write an arbitrary progress value directly.
 
+## Backing off board polling when no bingo event is running
+
+This plugin is a general clan tool, not bingo-only — most members keep it
+running for `!verify`/`!needed`/`!live`, clan broadcasts, and live-stream
+notifications whether or not a bingo event exists. Before this, the board
+refresh (`refreshBoard`, feeding both `BingoPanel` and the item-drop
+watch-list) polled `GET /api/board` every minute forever regardless, which
+is real ongoing load against the site's (free-tier) Vercel invocation
+quota for a feature that's often not even active.
+
+`BingoPlugin` now reads `BoardResponse.Config#bingoActive` (a `Boolean`,
+not a primitive — a missing/old field is treated as active/true, fail-open,
+so a deploy gap never silently looks like "the board stopped updating" for
+no visible reason) and tracks it in the `bingoActive` field. `scheduledRefresh`
+still runs every minute (unchanged — see below for why that matters), but
+calls `maybeRefreshBoard()` instead of `refreshBoard()` directly:
+`maybeRefreshBoard` skips the actual board fetch (and retry-queue drain)
+entirely once `bingoActive` is false, except once every
+`INACTIVE_BOARD_POLL_MILLIS` (30 min) so a re-activated event is noticed on
+its own without a client restart. `refreshBoard()` itself is still called
+directly (bypassing this backoff) from `startUp()`, `onGameStateChanged`,
+`onConfigChanged("apiKey")`, and after a successful proof submission — a
+real user action always gets an immediate, un-backed-off check.
+
+**Important, don't reintroduce this mistake**: an earlier pass at this same
+problem tried lowering `scheduledRefresh`'s overall period from 1 minute to
+2 minutes, on the reasoning that fewer total ticks means fewer requests.
+That's wrong for this codebase — `checkLiveStreams`/`checkBroadcast` share
+the same `@Schedule` method, and slowing them down directly delays "a clan
+member just went live" and admin broadcast notifications, which people
+actually notice. It was reverted back to 1 minute. The real fix for request
+volume is the `bingoActive` backoff above (a ~30x cut while inactive, not a
+2x one), plus response caching on the site side (see `osrsclan`'s
+`CLAUDE.md` — `twitch-live.ts` and now `runeprofile-proxy.ts`'s broadcast
+branch both cache at Vercel's edge, so the client can keep polling every
+minute without that translating into a function invocation every minute).
+Prefer edge caching over slowing down client polling wherever the choice
+comes up again — it decouples request frequency from backend cost instead
+of trading delay for it directly.
+
+## Sidebar panel: config toggle, styling, no more submit toast
+
+- **`showSidebar` config toggle** (`BingoConfig`, default on) — flips the
+  bingo nav icon in the client sidebar on/off live via
+  `onConfigChanged("showSidebar")`, no restart needed.
+- **Removed the "X auto-detected — submitted" toast** from `BingoPanel`
+  (`buildToast`, `notifyAutoSubmitted`, `lastAutoSubmitItem`/`lastAutoSubmitAt`,
+  `TOAST_WINDOW_MILLIS` all gone) — the chat message confirmation
+  (`notifyPlayer`, gated by the existing "Notify on bingo submit" toggle)
+  is untouched and is now the only on-submit confirmation.
+- **Visual polish**: the three progress bars (board/goals/leaderboard) were
+  inconsistent thicknesses (6px vs 4px) — unified to 8px on the shared
+  `ProgressBar` class. The team-color indicators in the header and
+  leaderboard rows were text glyphs (`■`/`●`), which render inconsistently
+  at small sizes depending on font — replaced with `colorChip()`, a small
+  painted rounded-rect swatch.
+
 ## Reference plugin: Anvil
 
 A more mature, unrelated clan's plugin (`github.com/AhmedFathy2001/anvil-plugin`
@@ -230,6 +287,19 @@ already uses.
 - [ ] Set a verification code in config, confirm it + a timestamp render
       top-left, and confirm a submitted proof screenshot actually has it
       baked in.
+- [ ] Toggle "Show sidebar" off/on in config, confirm the nav icon
+      disappears/reappears immediately with no restart.
+- [ ] On the site's Board Config admin page, untick "Bingo event active",
+      confirm the plugin's next board refresh is the last one for a while
+      (log line should show it skipping subsequent ticks); re-tick it and
+      confirm the very next scheduled tick refreshes again (not waiting out
+      the full 30-minute backoff, since re-activating should be noticed
+      quickly whenever the plugin does check — the 30-minute window is only
+      how long it can go between checks while still inactive, not a delay
+      on top of the next real check after reactivation).
+- [ ] With "Bingo event active" off, confirm live-stream-went-live and
+      admin broadcast notifications still arrive within about a minute —
+      these must not be affected by the bingo-active backoff at all.
 
 ## Related: the `osrsclan` site repo
 

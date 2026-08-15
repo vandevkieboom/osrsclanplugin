@@ -46,6 +46,17 @@ public class BoardResponse
 	{
 		public String name;
 		public int size;
+
+		/**
+		 * An admin-controlled "no event running right now" flag (see the
+		 * Board Config admin page). Boxed rather than a primitive boolean:
+		 * Gson defaults a missing primitive to false, which would silently
+		 * mean "bingo inactive" the moment this field is ever absent from a
+		 * response — a fresh deploy gap, a malformed response, anything.
+		 * Null is instead treated as active (fail-open) everywhere this is
+		 * read — see BingoPlugin#isBingoActive.
+		 */
+		public Boolean bingoActive;
 	}
 
 	public static class Team
