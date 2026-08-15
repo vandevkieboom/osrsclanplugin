@@ -102,6 +102,63 @@ public class BingoApiClient
 		});
 	}
 
+	/** Just the "is a bingo event running" flag — see BingoStatus for why this is separate from fetchBoard. */
+	public static class BingoStatus
+	{
+		public boolean bingoActive;
+	}
+
+	/**
+	 * A deliberately tiny, unauthenticated, edge-cached check — cheap enough
+	 * to poll every minute regardless of whether bingo is even active,
+	 * unlike fetchBoard (which queries tiles/teams/submissions per request
+	 * and can't be blanket-cached since its response is personalized per
+	 * caller). This is what lets the plugin notice a re-activated event
+	 * within about a minute instead of needing a slow, infrequent full
+	 * board check to catch it.
+	 */
+	public void fetchBingoStatus(Consumer<BingoStatus> onSuccess, Consumer<String> onError)
+	{
+		HttpUrl url = HttpUrl.parse(BASE_URL + "/api/board?resource=status");
+		if (url == null)
+		{
+			onError.accept("Invalid API base URL");
+			return;
+		}
+
+		Request request = new Request.Builder().url(url).get().build();
+
+		httpClient.newCall(request).enqueue(new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException e)
+			{
+				log.debug("Failed to fetch bingo status", e);
+				onError.accept("Could not reach the clan site");
+			}
+
+			@Override
+			public void onResponse(Call call, Response response)
+			{
+				try (Response closeable = response)
+				{
+					ResponseBody body = closeable.body();
+					if (!closeable.isSuccessful() || body == null)
+					{
+						onError.accept(describeFailure(closeable, parseErrorBody(body)));
+						return;
+					}
+					onSuccess.accept(gson.fromJson(body.charStream(), BingoStatus.class));
+				}
+				catch (JsonSyntaxException e)
+				{
+					log.debug("Malformed bingo status response", e);
+					onError.accept("The clan site returned an unexpected response");
+				}
+			}
+		});
+	}
+
 	/**
 	 * Uploads a screenshot as proof for a tile. The server re-checks that the
 	 * item satisfies the tile and that the tile still needs proof, so a stale

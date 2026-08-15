@@ -41,22 +41,17 @@ public class BoardResponse
 		return null;
 	}
 
-	/** The bingo event's own name/size — used for the sidebar panel's header, nothing else needed it before. */
+	/**
+	 * The bingo event's own name/size — used for the sidebar panel's header.
+	 * The "is bingo active" flag lives on a separate, dedicated endpoint
+	 * (see BingoApiClient#fetchBingoStatus) rather than here, since that
+	 * needs to be cheap enough to poll every minute regardless of activity,
+	 * unlike this response.
+	 */
 	public static class Config
 	{
 		public String name;
 		public int size;
-
-		/**
-		 * An admin-controlled "no event running right now" flag (see the
-		 * Board Config admin page). Boxed rather than a primitive boolean:
-		 * Gson defaults a missing primitive to false, which would silently
-		 * mean "bingo inactive" the moment this field is ever absent from a
-		 * response — a fresh deploy gap, a malformed response, anything.
-		 * Null is instead treated as active (fail-open) everywhere this is
-		 * read — see BingoPlugin#isBingoActive.
-		 */
-		public Boolean bingoActive;
 	}
 
 	public static class Team

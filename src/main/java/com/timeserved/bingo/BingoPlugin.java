@@ -20,7 +20,6 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 import javax.imageio.ImageIO;
 import javax.inject.Inject;
 import javax.swing.SwingUtilities;
@@ -138,27 +137,15 @@ public class BingoPlugin extends Plugin
 	private boolean checkedRuneProfileSync;
 
 	/**
-	 * Whether the site last reported an active bingo event (see
-	 * BoardResponse.Config#bingoActive). Defaults true so this plugin polls
-	 * normally until it's actually heard otherwise — starts optimistic, not
-	 * paused, on a fresh session. Read by scheduledRefresh to decide whether
-	 * this tick's board check happens at all; see lastBoardCheckAt.
+	 * Whether the site last reported an active bingo event. Kept current by
+	 * checkBingoStatus, a separate, deliberately tiny/cheap/cached request
+	 * (see BingoApiClient#fetchBingoStatus) that runs every scheduled tick
+	 * regardless of this value — unlike the actual board fetch, which is
+	 * expensive (tiles/teams/submissions) and only ever runs while this is
+	 * true. Defaults true so the plugin behaves normally until it's actually
+	 * heard otherwise, rather than starting paused on a fresh session.
 	 */
 	private volatile boolean bingoActive = true;
-
-	/**
-	 * Wall-clock time of the last actual board-refresh attempt, regardless of
-	 * outcome. When bingoActive is false, maybeRefreshBoard skips most ticks
-	 * entirely rather than hitting the site every minute forever for an
-	 * event that isn't running — this plugin is a general clan tool (chat
-	 * commands, live-stream/broadcast notifications), not bingo-only, so
-	 * most installs would otherwise poll bingo endpoints year-round for no
-	 * reason. INACTIVE_BOARD_POLL_MILLIS still checks back occasionally so a
-	 * re-activated event is noticed without needing a client restart.
-	 */
-	private volatile long lastBoardCheckAt;
-
-	private static final long INACTIVE_BOARD_POLL_MILLIS = TimeUnit.MINUTES.toMillis(30);
 
 	/**
 	 * Item id -> the tiles it can satisfy, for this player's own team only.
@@ -308,7 +295,6 @@ public class BingoPlugin extends Plugin
 		previouslyLiveUsernames = null;
 		checkedRuneProfileSync = false;
 		bingoActive = true;
-		lastBoardCheckAt = 0;
 	}
 
 	@Subscribe
@@ -316,7 +302,16 @@ public class BingoPlugin extends Plugin
 	{
 		if (event.getGameState() == GameState.LOGGED_IN)
 		{
-			refreshBoard();
+			// Fires on every area/instance load, not just a literal login —
+			// during something like raids or minigames this can happen many
+			// times in quick succession, so the expensive board fetch only
+			// runs here if bingo is actually active; checkBingoStatus's next
+			// tick picks up a reactivation regardless of how long it's been
+			// since this last fired.
+			if (bingoActive)
+			{
+				refreshBoard();
+			}
 			checkRuneProfileSync();
 			checkBroadcast();
 		}
@@ -350,41 +345,43 @@ public class BingoPlugin extends Plugin
 	 * Runs every minute for every plugin user, forever — this is a general
 	 * clan tool (chat commands, live-stream/broadcast notifications), not a
 	 * bingo-only one, so most installs run this whether or not a bingo event
-	 * even exists. checkLiveStreams/checkBroadcast stay on this 1-minute
-	 * cadence deliberately — going live or an admin broadcast are both
-	 * things worth surfacing promptly, and slowing those down to save a
-	 * trivial number of requests isn't a good trade. The actual saving
-	 * against the site's (free-tier) Vercel invocation quota comes from
-	 * maybeRefreshBoard below instead: the board-specific half backs off to
-	 * once per 30 minutes once the site reports no active bingo event,
-	 * rather than hitting that endpoint every minute for months between
-	 * events — a much bigger cut than slowing every check down would have
-	 * been, without costing anything on the checks people actually notice
-	 * the delay on.
+	 * even exists. checkBingoStatus is a deliberately tiny, cached, near-free
+	 * request (see BingoApiClient#fetchBingoStatus) that's cheap enough to
+	 * run every tick regardless — the actual expensive work (refreshBoard,
+	 * which queries tiles/teams/submissions) only happens on ticks where
+	 * that check says a bingo event is genuinely active, so there's nothing
+	 * bingo-related running at all beyond one tiny cached ping while no
+	 * event is on. checkLiveStreams/checkBroadcast stay on this same
+	 * 1-minute cadence unconditionally — going live or an admin broadcast
+	 * are both things worth surfacing promptly.
 	 */
 	@Schedule(period = 1, unit = ChronoUnit.MINUTES, asynchronous = true)
 	public void scheduledRefresh()
 	{
-		maybeRefreshBoard();
+		checkBingoStatus();
 		checkLiveStreams();
 		checkBroadcast();
 	}
 
 	/**
-	 * Gates the board-specific work (board refresh + retry-queue drain)
-	 * behind bingoActive, unlike the always-on checks in scheduledRefresh.
-	 * Still checks back every INACTIVE_BOARD_POLL_MILLIS even while
-	 * inactive, purely so a re-activated event is picked up on its own
-	 * without needing a client restart.
+	 * The only thing that runs every tick regardless of whether bingo is
+	 * active — see fetchBingoStatus's doc for why this is safe to do at
+	 * this frequency. Triggers the real (expensive) refreshBoard only once
+	 * this comes back true; otherwise nothing bingo-related happens this
+	 * tick at all.
 	 */
-	private void maybeRefreshBoard()
+	private void checkBingoStatus()
 	{
-		if (!bingoActive && System.currentTimeMillis() - lastBoardCheckAt < INACTIVE_BOARD_POLL_MILLIS)
-		{
-			return;
-		}
-		refreshBoard();
-		retryPendingSubmissions();
+		api.fetchBingoStatus(
+			status -> {
+				bingoActive = status.bingoActive;
+				if (bingoActive)
+				{
+					refreshBoard();
+					retryPendingSubmissions();
+				}
+			},
+			error -> log.debug("Failed to check bingo status: {}", error));
 	}
 
 	/**
@@ -394,10 +391,10 @@ public class BingoPlugin extends Plugin
 	 * own hiscores polling (see osrsclan/api/_lib/board.ts), so this only
 	 * ever has to watch for item drops.
 	 *
-	 * <p>Called directly (bypassing maybeRefreshBoard's backoff) from
-	 * onGameStateChanged/onConfigChanged, so a login or a key change always
-	 * gets an immediate, real check rather than waiting out whatever's left
-	 * of the current backoff window.
+	 * <p>Called directly (bypassing checkBingoStatus's gate) from
+	 * startUp/onGameStateChanged/onConfigChanged/onSubmitted — a login, a
+	 * key change, or a real submission always gets an immediate, real check
+	 * rather than waiting on the next scheduled tick.
 	 */
 	private void refreshBoard()
 	{
@@ -413,9 +410,6 @@ public class BingoPlugin extends Plugin
 		api.fetchBoard(
 			apiKey,
 			board -> {
-				lastBoardCheckAt = System.currentTimeMillis();
-				bingoActive = board.config == null || board.config.bingoActive == null || board.config.bingoActive;
-
 				SwingUtilities.invokeLater(() -> bingoPanel.refresh(board));
 
 				BoardResponse.Team myTeam = board.findMyTeam();
@@ -438,14 +432,7 @@ public class BingoPlugin extends Plugin
 				tilesByItemId.putAll(nextItemLookup);
 				log.debug("Bingo board refreshed: watching {} item ids", nextItemLookup.size());
 			},
-			error -> {
-				// A transport/server failure tells us nothing about whether
-				// bingo is active — leave bingoActive as it was, but still
-				// bump lastBoardCheckAt so a prolonged outage doesn't turn
-				// into a tight retry loop on top of the real backoff.
-				lastBoardCheckAt = System.currentTimeMillis();
-				log.debug("Bingo board refresh failed: {}", error);
-			});
+			error -> log.debug("Bingo board refresh failed: {}", error));
 	}
 
 	@Subscribe

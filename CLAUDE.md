@@ -50,39 +50,53 @@ This plugin is a general clan tool, not bingo-only — most members keep it
 running for `!verify`/`!needed`/`!live`, clan broadcasts, and live-stream
 notifications whether or not a bingo event exists. Before this, the board
 refresh (`refreshBoard`, feeding both `BingoPanel` and the item-drop
-watch-list) polled `GET /api/board` every minute forever regardless, which
-is real ongoing load against the site's (free-tier) Vercel invocation
-quota for a feature that's often not even active.
+watch-list — a real query over tiles/teams/submissions) polled
+`GET /api/board` every minute forever regardless, which is real ongoing
+load against the site's (free-tier) Vercel invocation quota for a feature
+that's often not even active.
 
-`BingoPlugin` now reads `BoardResponse.Config#bingoActive` (a `Boolean`,
-not a primitive — a missing/old field is treated as active/true, fail-open,
-so a deploy gap never silently looks like "the board stopped updating" for
-no visible reason) and tracks it in the `bingoActive` field. `scheduledRefresh`
-still runs every minute (unchanged — see below for why that matters), but
-calls `maybeRefreshBoard()` instead of `refreshBoard()` directly:
-`maybeRefreshBoard` skips the actual board fetch (and retry-queue drain)
-entirely once `bingoActive` is false, except once every
-`INACTIVE_BOARD_POLL_MILLIS` (30 min) so a re-activated event is noticed on
-its own without a client restart. `refreshBoard()` itself is still called
-directly (bypassing this backoff) from `startUp()`, `onGameStateChanged`,
-`onConfigChanged("apiKey")`, and after a successful proof submission — a
-real user action always gets an immediate, un-backed-off check.
+The fix went through two designs; only the second is in the code now:
 
-**Important, don't reintroduce this mistake**: an earlier pass at this same
-problem tried lowering `scheduledRefresh`'s overall period from 1 minute to
-2 minutes, on the reasoning that fewer total ticks means fewer requests.
-That's wrong for this codebase — `checkLiveStreams`/`checkBroadcast` share
-the same `@Schedule` method, and slowing them down directly delays "a clan
-member just went live" and admin broadcast notifications, which people
-actually notice. It was reverted back to 1 minute. The real fix for request
-volume is the `bingoActive` backoff above (a ~30x cut while inactive, not a
-2x one), plus response caching on the site side (see `osrsclan`'s
-`CLAUDE.md` — `twitch-live.ts` and now `runeprofile-proxy.ts`'s broadcast
-branch both cache at Vercel's edge, so the client can keep polling every
-minute without that translating into a function invocation every minute).
-Prefer edge caching over slowing down client polling wherever the choice
-comes up again — it decouples request frequency from backend cost instead
-of trading delay for it directly.
+1. **First attempt (replaced, don't reintroduce)**: read an
+   `bingoActive` flag off the normal board response, and once false, back
+   the *entire* board fetch down to once per 30 minutes. This worked for
+   cutting cost, but made turning an event back on take up to 30 minutes
+   to be noticed — backwards, since re-activating is exactly the moment
+   you want picked up fast, not slow.
+2. **What's actually implemented**: `GET /api/board?resource=status` is a
+   second, separate, deliberately tiny endpoint on the site that returns
+   *only* `{ bingoActive }`, cached at Vercel's edge for 30s
+   (`BingoApiClient#fetchBingoStatus`, `BingoApiClient.BingoStatus`). It's
+   cheap enough that `checkBingoStatus()` polls it every single
+   `scheduledRefresh` tick (every minute) *unconditionally* — that's the
+   only bingo-related thing that happens at all while inactive. The real
+   (expensive) `refreshBoard()` + `retryPendingSubmissions()` only run
+   inside `checkBingoStatus`'s success callback, when the ping itself says
+   `bingoActive` is true. `bingoActive` (the field) also gates the
+   `refreshBoard()` call in `onGameStateChanged`, which fires on every
+   area/instance load (raids, minigames — not just literal login), so
+   that doesn't sneak in extra expensive fetches while inactive either.
+   `refreshBoard()` is still called directly, unconditionally, from
+   `startUp()`, `onConfigChanged("apiKey")`, and after a successful proof
+   submission — real, rare, user-driven moments that should always get an
+   immediate check regardless of the last known ping result.
+
+**Important, don't reintroduce the first design.** A separate, even
+simpler mistake also got made and reverted along the way: lowering
+`scheduledRefresh`'s overall period from 1 minute to 2 minutes, reasoning
+that fewer ticks means fewer requests. That's wrong here —
+`checkLiveStreams`/`checkBroadcast` share the same `@Schedule` method, and
+slowing them down directly delays "a clan member just went live" and
+admin broadcast notifications, which people actually notice. Reverted
+back to 1 minute; the actual request-volume fix is the cheap-ping/
+expensive-fetch split above, plus response caching on the site side (see
+`osrsclan`'s `CLAUDE.md` — `twitch-live.ts` and now
+`runeprofile-proxy.ts`'s broadcast branch both cache at Vercel's edge, so
+polling every minute doesn't mean invoking the function every minute).
+Prefer edge caching / a cheap-ping-then-expensive-fetch split over slowing
+down client polling wherever this trade-off comes up again — both
+decouple request frequency from backend cost, rather than trading delay
+for cost directly the way a slower interval does.
 
 ## Sidebar panel: config toggle, styling, no more submit toast
 
@@ -290,13 +304,11 @@ already uses.
 - [ ] Toggle "Show sidebar" off/on in config, confirm the nav icon
       disappears/reappears immediately with no restart.
 - [ ] On the site's Board Config admin page, untick "Bingo event active",
-      confirm the plugin's next board refresh is the last one for a while
-      (log line should show it skipping subsequent ticks); re-tick it and
-      confirm the very next scheduled tick refreshes again (not waiting out
-      the full 30-minute backoff, since re-activating should be noticed
-      quickly whenever the plugin does check — the 30-minute window is only
-      how long it can go between checks while still inactive, not a delay
-      on top of the next real check after reactivation).
+      wait a couple minutes, confirm debug logs show `refreshBoard`/the
+      "Bingo board refreshed" line has stopped appearing while
+      `checkBingoStatus` keeps ticking every minute regardless; re-tick it
+      and confirm the very next scheduled tick (within ~1 minute, not 30)
+      does a real board refresh again.
 - [ ] With "Bingo event active" off, confirm live-stream-went-live and
       admin broadcast notifications still arrive within about a minute —
       these must not be affected by the bingo-active backoff at all.
