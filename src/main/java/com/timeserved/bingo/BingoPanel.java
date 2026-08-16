@@ -47,7 +47,7 @@ import net.runelite.client.ui.PluginPanel;
 
 /**
  * The clan bingo sidebar tab: the caller's team board, any xp/kc goal tiles, a clan-wide leaderboard,
- * and a status line. Every section (except the header) is only added when there's real data for it —
+ * and a status line. Every section (except the header) is only added when there's real data for it -
  * e.g. no goal tiles on the board means no "Team Goals" header floating over nothing.
  */
 @Slf4j
@@ -62,7 +62,7 @@ public class BingoPanel extends PluginPanel
 	private static final int CONTENT_PADDING = 10;
 	/**
 	 * The real usable width for content in this sidebar, computed from RuneLite's own fixed constants
-	 * rather than discovered at runtime — PluginPanel.PANEL_WIDTH never changes while the client is
+	 * rather than discovered at runtime - PluginPanel.PANEL_WIDTH never changes while the client is
 	 * running, so there's no need to measure getWidth() during a layout pass (and no risk of the
 	 * self-correction timing bug that came from trying to).
 	 */
@@ -72,7 +72,7 @@ public class BingoPanel extends PluginPanel
 	private final ScheduledExecutorService executor;
 	private final Map<String, ImageIcon> iconCache = new ConcurrentHashMap<>();
 	/** Which collapsible sections are open, keyed by a short section id. Survives refresh()'s full
-	 * teardown-and-rebuild — otherwise every board poll would silently re-expand anything you'd closed. */
+	 * teardown-and-rebuild - otherwise every board poll would silently re-expand anything you'd closed. */
 	private final Map<String, Boolean> sectionExpanded = new HashMap<>();
 
 	private final JPanel content = new ScrollableColumn();
@@ -113,7 +113,7 @@ public class BingoPanel extends PluginPanel
 		statusTimer.stop();
 	}
 
-	/** Shown whenever there's no plugin key configured — nothing to fetch, so nothing to show. */
+	/** Shown whenever there's no plugin key configured - nothing to fetch, so nothing to show. */
 	public void showNoApiKey()
 	{
 		content.removeAll();
@@ -130,9 +130,9 @@ public class BingoPanel extends PluginPanel
 	/**
 	 * Rebuilds the whole panel from a fresh board fetch. Must be called on the EDT.
 	 *
-	 * <p>This is a full teardown-and-rebuild every time — including every scheduled poll and every
+	 * <p>This is a full teardown-and-rebuild every time - including every scheduled poll and every
 	 * teleport (RuneLite fires GameState.LOGGED_IN for any area/instance load, not just literal login,
-	 * and BingoPlugin refreshes the board on it) — so without this, the scroll position would snap back
+	 * and BingoPlugin refreshes the board on it) - so without this, the scroll position would snap back
 	 * to the top on every single refresh, making it look like sections were swapping places if you
 	 * happened to be scrolled down to one of them.
 	 */
@@ -144,10 +144,10 @@ public class BingoPanel extends PluginPanel
 		// scroll-position correction: rebuilding every section fresh means
 		// their combined height is briefly whatever partial state they're
 		// in mid-rebuild (e.g. a section not added yet, or the board grid's
-		// real height not yet known — see loadIconInto), which BoxLayout is
+		// real height not yet known - see loadIconInto), which BoxLayout is
 		// free to lay out and paint before this method even returns. A
 		// hidden component is skipped by its parent's paint entirely, so
-		// none of those intermediate layouts are ever actually shown —
+		// none of those intermediate layouts are ever actually shown -
 		// setVisible(true) in the deferred callback below is the first
 		// paint anyone sees, and by then the layout is already final.
 		content.setVisible(false);
@@ -182,7 +182,7 @@ public class BingoPanel extends PluginPanel
 
 		// Deliberately no content.repaint() here: revalidate() only *schedules* the layout pass and
 		// doesn't itself paint anything, but repainting immediately would still show one real frame at
-		// the reset (top) scroll position before the correction below took effect — restoring the value
+		// the reset (top) scroll position before the correction below took effect - restoring the value
 		// fixes the number, but the wrong position had already been painted, which is the actual "jump"
 		// being seen. Deferring both the correction AND the repaint into the same later callback means
 		// the scrollbar is already right before anything is drawn at all, so that frame never happens.
@@ -252,7 +252,7 @@ public class BingoPanel extends PluginPanel
 		List<BoardResponse.Tile> allTiles = myTeam.getTiles();
 		if (!allTiles.isEmpty())
 		{
-			// Every tile — item or xp/kc goal — occupies a real board position (see the `position` column
+			// Every tile - item or xp/kc goal - occupies a real board position (see the `position` column
 			// in db/schema.sql), so all of them belong in the grid, not just item tiles. A tile that isn't
 			// on the current team's board response yet (goal or otherwise) just leaves that slot blank.
 			int size = board.config != null && board.config.size > 0
@@ -271,7 +271,7 @@ public class BingoPanel extends PluginPanel
 
 			body.add(Box.createVerticalStrut(8));
 			// A plain GridLayout can't do "stretch to fill the full width, but derive height so cells stay
-			// square" — it either stretches both dimensions (rectangles, the original bug) or neither
+			// square" - it either stretches both dimensions (rectangles, the original bug) or neither
 			// (a small fixed block that wastes the rest of the sidebar, what happened after capping both).
 			// SquareTileGrid computes cell size from its actual assigned width at layout time instead.
 			SquareTileGrid grid = new SquareTileGrid(size, 3, content);
@@ -283,7 +283,7 @@ public class BingoPanel extends PluginPanel
 					continue;
 				}
 				// Item tiles have approved/pending/rejected/none; goal tiles are only ever approved (target
-				// reached) or none (see api/board.ts) — both map onto the same two/three visual states fine.
+				// reached) or none (see api/board.ts) - both map onto the same two/three visual states fine.
 				TileCell.State state = "approved".equals(tile.status) ? TileCell.State.DONE
 					: "pending".equals(tile.status) ? TileCell.State.PENDING
 					: TileCell.State.EMPTY;
@@ -298,7 +298,7 @@ public class BingoPanel extends PluginPanel
 		return collapsibleSection("board", "Your Board", myTeam.completeCount + "/" + myTeam.totalTiles, body);
 	}
 
-	/** An unconfigured board position — no tile at all, not just an incomplete one. */
+	/** An unconfigured board position - no tile at all, not just an incomplete one. */
 	private static JPanel blankSlot()
 	{
 		JPanel slot = new JPanel();
@@ -431,7 +431,7 @@ public class BingoPanel extends PluginPanel
 			}
 		}
 
-		// Own team fell outside the top N — pin it below with a small gap, so you can always see where
+		// Own team fell outside the top N - pin it below with a small gap, so you can always see where
 		// you stand even if the board's full of teams ahead of yours.
 		boolean myTeamShown = shown.stream().anyMatch(t -> t.id.equals(board.myTeamId));
 		if (!myTeamShown && board.myTeamId != null)
@@ -458,7 +458,7 @@ public class BingoPanel extends PluginPanel
 		Color barColor = mine ? teamColor : NEUTRAL_SWATCH;
 		if (mine)
 		{
-			// A plain gray hover color didn't read as "your team" clearly enough — a translucent tint of
+			// A plain gray hover color didn't read as "your team" clearly enough - a translucent tint of
 			// the team's own accent color stands out regardless of what that color actually is.
 			row.setOpaque(true);
 			row.setBackground(new Color(
@@ -525,7 +525,7 @@ public class BingoPanel extends PluginPanel
 		return row;
 	}
 
-	/** Ticks independently of a full refresh() — a board re-fetch only happens once a minute, but the
+	/** Ticks independently of a full refresh() - a board re-fetch only happens once a minute, but the
 	 * "synced Xs ago" text should visibly count up in between. */
 	private void updateStatusLabelText()
 	{
@@ -552,13 +552,13 @@ public class BingoPanel extends PluginPanel
 	// ---- shared helpers --------------------------------------------------
 
 	/**
-	 * A section with a clickable, arrow-prefixed header that expands/collapses {@code body} — an
+	 * A section with a clickable, arrow-prefixed header that expands/collapses {@code body} - an
 	 * accordion, so a long board doesn't force scrolling past sections you already know the state of.
 	 * Expand/collapse state is kept in {@link #sectionExpanded} by {@code key}, not on the component
 	 * itself, since refresh() tears down and rebuilds every section fresh on every poll; without that,
 	 * anything you'd collapsed would silently pop back open on the next refresh.
 	 *
-	 * <p>The whole header row toggles on click, not just the arrow glyph — Swing delivers a mouse event
+	 * <p>The whole header row toggles on click, not just the arrow glyph - Swing delivers a mouse event
 	 * to whichever child component is directly under the cursor, so the same listener has to be attached
 	 * to the row itself AND every label inside it, or clicking directly on the title text would do nothing.
 	 */
@@ -688,7 +688,7 @@ public class BingoPanel extends PluginPanel
 	}
 
 	/**
-	 * A height-capped, left-aligned container so a BoxLayout parent can't stretch it — for layouts that
+	 * A height-capped, left-aligned container so a BoxLayout parent can't stretch it - for layouts that
 	 * don't care which container they're attached to (BorderLayout, GridLayout). BoxLayout itself can't
 	 * go through this: it's validated against the exact container it's constructed with, so a vertical or
 	 * horizontal box needs {@link #cappedColumn()} / {@link #cappedRow()} instead, which set it on
@@ -760,7 +760,7 @@ public class BingoPanel extends PluginPanel
 
 	// ---- self-painted components (deliberately not native JProgressBar) -------
 
-	/** A flat, self-painted progress bar — avoids relying on any Look and Feel's native progress-bar chrome. */
+	/** A flat, self-painted progress bar - avoids relying on any Look and Feel's native progress-bar chrome. */
 	private static final class ProgressBar extends JPanel
 	{
 		private double fraction;
@@ -809,7 +809,7 @@ public class BingoPanel extends PluginPanel
 
 	/**
 	 * A grid of square cells that fills whatever width the sidebar actually has, deriving cell (and
-	 * therefore overall) height from that width — the Swing equivalent of CSS's
+	 * therefore overall) height from that width - the Swing equivalent of CSS's
 	 * {@code aspect-ratio: 1} on a {@code repeat(N, 1fr)} grid.
 	 *
 	 * <p>Three earlier versions of this got the width wrong. One measured its OWN getWidth() during
@@ -818,16 +818,16 @@ public class BingoPanel extends PluginPanel
 	 * Swing clipped them. Another computed a width from RuneLite's documented sidebar constants up
 	 * front, which was close but assumed a scrollbar width that didn't match what this JScrollPane's
 	 * actual scrollbar renders at, leaving an unfilled gap. A third read {@link #getParent()}'s width
-	 * instead of this component's own — correct in principle (a container can't be asked to arrange its
+	 * instead of this component's own - correct in principle (a container can't be asked to arrange its
 	 * children until it already has real bounds itself), but it silently assumed the grid's immediate
 	 * parent WAS the one reliably-already-sized ancestor. That broke the moment a collapsible-section
 	 * wrapper got inserted between them: the grid's very first preferred-size query (before its new,
 	 * deeper parent had a valid width yet) got cached into the ancestor chain's reserved height by
 	 * BoxLayout, while doLayout() below went on to correctly compute a bigger cellSize once the parent
-	 * DID have a real width — same clipped-bottom-row bug as the very first version, just introduced by
+	 * DID have a real width - same clipped-bottom-row bug as the very first version, just introduced by
 	 * a refactor nobody expected to affect this.
 	 *
-	 * <p>The actual fix: don't guess which ancestor is reliable — take an explicit reference to one that
+	 * <p>The actual fix: don't guess which ancestor is reliable - take an explicit reference to one that
 	 * always is. {@code widthReference} is {@link BingoPanel#content}, the scroll view itself, which the
 	 * JScrollPane machinery keeps sized to the real sidebar width no matter how many wrapper panels this
 	 * class ends up nested under in the future.
@@ -854,7 +854,7 @@ public class BingoPanel extends PluginPanel
 		}
 
 		/** {@link #widthReference}'s real interior width, or a fallback if it isn't realized yet
-		 * (shouldn't normally happen — see the class doc). */
+		 * (shouldn't normally happen - see the class doc). */
 		private int availableWidth()
 		{
 			if (widthReference.getWidth() > 0)
@@ -941,7 +941,7 @@ public class BingoPanel extends PluginPanel
 		}
 
 		/**
-		 * Overrides {@code paint}, not {@code paintComponent} — {@code paintComponent} runs BEFORE Swing
+		 * Overrides {@code paint}, not {@code paintComponent} - {@code paintComponent} runs BEFORE Swing
 		 * paints this panel's children (the icon label), so drawing the badge there put it underneath the
 		 * item icon whenever the two overlapped in the corner. {@code paint} runs the whole
 		 * background+children+border sequence via {@code super.paint}, then this draws the badge on top of
@@ -983,7 +983,7 @@ public class BingoPanel extends PluginPanel
 	}
 
 	/**
-	 * A column that fills the scroll viewport's width so rows never clip horizontally — a plain JPanel
+	 * A column that fills the scroll viewport's width so rows never clip horizontally - a plain JPanel
 	 * view gets its preferred width inside a JScrollPane, so with HORIZONTAL_SCROLLBAR_NEVER any row
 	 * wider than the sidebar silently disappears under the vertical scrollbar.
 	 */

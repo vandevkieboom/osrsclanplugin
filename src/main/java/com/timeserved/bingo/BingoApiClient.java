@@ -102,14 +102,14 @@ public class BingoApiClient
 		});
 	}
 
-	/** Just the "is a bingo event running" flag — see BingoStatus for why this is separate from fetchBoard. */
+	/** Just the "is a bingo event running" flag - see BingoStatus for why this is separate from fetchBoard. */
 	public static class BingoStatus
 	{
 		public boolean bingoActive;
 	}
 
 	/**
-	 * A deliberately tiny, unauthenticated, edge-cached check — cheap enough
+	 * A deliberately tiny, unauthenticated, edge-cached check - cheap enough
 	 * to poll every minute regardless of whether bingo is even active,
 	 * unlike fetchBoard (which queries tiles/teams/submissions per request
 	 * and can't be blanket-cached since its response is personalized per
@@ -218,7 +218,7 @@ public class BingoApiClient
 		});
 	}
 
-	/** Result of a {@link #lookupRank} call — mirrors GET /api/runeprofile-proxy?resource=lookup-rank. */
+	/** Result of a {@link #lookupRank} call - mirrors GET /api/runeprofile-proxy?resource=lookup-rank. */
 	public static class RankLookupResult
 	{
 		public String rsn;
@@ -238,19 +238,19 @@ public class BingoApiClient
 		/** How many more items are needed for nextRank; null when nextRank is null. */
 		public Integer neededForNextRank;
 
-		/** Up to 8 item names still missing for nextRank — never null, just possibly empty. */
+		/** Up to 8 item names still missing for nextRank - never null, just possibly empty. */
 		public List<String> missingItemNames;
 	}
 
 	/**
 	 * Runs the exact same rank-progress check as the "Auto-Verify" button on
 	 * the clan site's Clan Ranks page, server-side, for the given RSN. Only
-	 * ever reports what rank someone qualifies for — there's no way to
+	 * ever reports what rank someone qualifies for - there's no way to
 	 * actually apply an in-game clan rank from here or anywhere else.
 	 *
 	 * <p>onError's second argument is the server's machine-readable failure
 	 * {@code reason} when it sent one (currently only "not-on-runeprofile"),
-	 * or null for anything else (including a plain network failure) — lets
+	 * or null for anything else (including a plain network failure) - lets
 	 * callers like the RuneProfile-sync reminder act on a specific failure
 	 * without string-matching the human-readable message.
 	 *
@@ -309,7 +309,7 @@ public class BingoApiClient
 		});
 	}
 
-	/** Result of a {@link #checkClanRequirement} call — mirrors GET /api/runeprofile-proxy?resource=clan-req. */
+	/** Result of a {@link #checkClanRequirement} call - mirrors GET /api/runeprofile-proxy?resource=clan-req. */
 	public static class ClanRequirementResult
 	{
 		public String rsn;
@@ -322,12 +322,12 @@ public class BingoApiClient
 	}
 
 	/**
-	 * Checks the clan's hard gear/kc requirement for the given RSN — the
+	 * Checks the clan's hard gear/kc requirement for the given RSN - the
 	 * same three-way check ("6+ Crystal Armour Seeds + an Enhanced Crystal
 	 * Weapon Seed", "800+ Corrupted Gauntlet kc", or "a Twisted Bow") the
 	 * site itself runs on its Clan Rankings page. Deliberately separate from
 	 * {@link #lookupRank}: that reports rank-tier eligibility, this reports
-	 * whether a much stricter, single gate is met — two different
+	 * whether a much stricter, single gate is met - two different
 	 * questions, so two different commands/endpoints rather than one
 	 * overloaded reply.
 	 *
@@ -384,7 +384,7 @@ public class BingoApiClient
 		});
 	}
 
-	/** One currently-live stream — mirrors GET /api/twitch-live's LiveStream shape. */
+	/** One currently-live stream - mirrors GET /api/twitch-live's LiveStream shape. */
 	public static class LiveStream
 	{
 		public String username;
@@ -402,7 +402,7 @@ public class BingoApiClient
 	/**
 	 * Which of the clan's known Twitch channels (site-configured, not
 	 * plugin-configured) are live right now. Public data, same as the
-	 * site's own homepage widget — no plugin key needed or sent.
+	 * site's own homepage widget - no plugin key needed or sent.
 	 */
 	public void fetchLiveStreams(Consumer<List<LiveStream>> onSuccess, Consumer<String> onError)
 	{
@@ -447,7 +447,7 @@ public class BingoApiClient
 		});
 	}
 
-	/** Result of a {@link #fetchBroadcast} call — mirrors GET /api/runeprofile-proxy?resource=broadcast. */
+	/** Result of a {@link #fetchBroadcast} call - mirrors GET /api/runeprofile-proxy?resource=broadcast. */
 	public static class BroadcastResult
 	{
 		public String message;
@@ -459,7 +459,7 @@ public class BingoApiClient
 	/**
 	 * The latest one-off message an admin has pushed out from the site's
 	 * Board Config panel. Callers compare updatedAt against the last one
-	 * they've already shown to tell a new broadcast from one already seen —
+	 * they've already shown to tell a new broadcast from one already seen -
 	 * this always returns the current message, not just new ones. Public,
 	 * no plugin key: same reasoning as lookupRank above.
 	 */
@@ -506,7 +506,7 @@ public class BingoApiClient
 		});
 	}
 
-	/** A parsed {"error": "...", "reason": "..."} body — reason is usually absent. */
+	/** A parsed {"error": "...", "reason": "..."} body - reason is usually absent. */
 	private static class ErrorBody
 	{
 		String error;
@@ -554,7 +554,7 @@ public class BingoApiClient
 
 		if (response.code() == 401)
 		{
-			return "Your plugin key was rejected — generate a new one on the clan site";
+			return "Your plugin key was rejected - generate a new one on the clan site";
 		}
 		return "The clan site returned an error (" + response.code() + ")";
 	}

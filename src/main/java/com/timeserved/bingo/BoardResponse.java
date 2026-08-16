@@ -42,7 +42,7 @@ public class BoardResponse
 	}
 
 	/**
-	 * The bingo event's own name/size — used for the sidebar panel's header.
+	 * The bingo event's own name/size - used for the sidebar panel's header.
 	 * The "is bingo active" flag lives on a separate, dedicated endpoint
 	 * (see BingoApiClient#fetchBingoStatus) rather than here, since that
 	 * needs to be cheap enough to poll every minute regardless of activity,
@@ -81,7 +81,7 @@ public class BoardResponse
 		public int requiredCount;
 		public int approvedCount;
 		public int pendingCount;
-		/** "approved" | "pending" | "rejected" | "none" — server-computed, mirrors the website's own status. */
+		/** "approved" | "pending" | "rejected" | "none" - server-computed, mirrors the website's own status. */
 		public String status;
 		public List<Integer> itemIds;
 
@@ -89,7 +89,7 @@ public class BoardResponse
 		 * "item" (the default) is the proof/review tile this plugin submits
 		 * screenshots for; "xp"/"kc" is a team-combined total tracked entirely
 		 * server-side from the clan's hiscores (see osrsclan/api/_lib/board.ts)
-		 * — those tiles are never in {@code itemIds} and never take a
+		 * - those tiles are never in {@code itemIds} and never take a
 		 * screenshot, they're purely display: teamProgress below is all the
 		 * plugin needs to show for them.
 		 */
@@ -123,7 +123,7 @@ public class BoardResponse
 		 * Whether this tile still has room for another proof. Mirrors the
 		 * server's own rule (api/_lib/board.ts): approved and pending proofs
 		 * both count towards the requirement, so a tile awaiting review isn't
-		 * submitted again. Only meaningful for item tiles — xp/kc tiles have
+		 * submitted again. Only meaningful for item tiles - xp/kc tiles have
 		 * no proofs at all.
 		 */
 		public boolean needsMoreProof()
