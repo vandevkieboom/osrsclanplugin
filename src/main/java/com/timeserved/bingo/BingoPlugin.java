@@ -56,8 +56,8 @@ import net.runelite.client.util.Text;
 @PluginDescriptor(
 	name = "Time Served",
 	description = "Tools for the Time Served clan: auto-submits bingo tile proofs when you get a matching drop,"
-		+ " and adds a \"!verify <name>\" chat command to check a clan member's rank eligibility.",
-	tags = {"bingo", "clan", "loot", "screenshot", "event", "verify", "rank"}
+		+ " plus \"!rank\"/\"!verify\" chat commands to check a clan member's rank eligibility and gear requirements.",
+	tags = {"bingo", "clan", "loot", "screenshot", "verify", "rank", "twitch"}
 )
 public class BingoPlugin extends Plugin
 {
@@ -785,10 +785,10 @@ public class BingoPlugin extends Plugin
 	}
 
 	/**
-	 * Handles "!needed [name]" — same shape as !verify (real sent message,
+	 * Handles "!needed [name]" — same shape as !rank (real sent message,
 	 * self by default, rewritten in place with the result), just reporting
 	 * what's missing for the next rank tier instead of the current one.
-	 * Kept as its own command rather than folded into !verify's reply so
+	 * Kept as its own command rather than folded into !rank's reply so
 	 * that reply can stay a single short line.
 	 */
 	private void onNeededCommand(ChatMessage chatMessage, String message)
@@ -806,7 +806,7 @@ public class BingoPlugin extends Plugin
 	}
 
 	/**
-	 * Handles "!live" the same way as !verify: a real sent message that
+	 * Handles "!live" the same way as !rank: a real sent message that
 	 * setChatReply then overwrites with the result. Needs no plugin key —
 	 * live status is public site data, same as the site's own homepage.
 	 */
