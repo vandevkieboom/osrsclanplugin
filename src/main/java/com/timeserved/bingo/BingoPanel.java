@@ -215,8 +215,6 @@ public class BingoPanel extends PluginPanel
 		if (myTeam != null)
 		{
 			Color teamColor = parseColor(myTeam.accentColor, ColorScheme.BRAND_ORANGE);
-			metaRow.add(colorChip(teamColor, 9));
-			metaRow.add(Box.createHorizontalStrut(5));
 
 			JLabel teamName = new JLabel(myTeam.name);
 			teamName.setFont(FontManager.getRunescapeSmallFont().deriveFont(Font.BOLD));
@@ -228,10 +226,6 @@ public class BingoPanel extends PluginPanel
 			metaRow.add(smallLabel("No team yet", ColorScheme.LIGHT_GRAY_COLOR));
 		}
 
-		if (board.config != null && board.config.size > 0)
-		{
-			metaRow.add(smallLabel("  ·  " + board.config.size + "×" + board.config.size, ColorScheme.LIGHT_GRAY_COLOR));
-		}
 		metaRow.add(Box.createHorizontalGlue());
 		header.add(metaRow);
 		return header;
@@ -244,7 +238,7 @@ public class BingoPanel extends PluginPanel
 		JPanel body = cappedColumn();
 
 		JPanel progressRow = cappedRow();
-		progressRow.add(smallLabel("Team progress", ColorScheme.LIGHT_GRAY_COLOR));
+		progressRow.add(smallLabel("Team progress", Color.WHITE));
 		progressRow.add(Box.createHorizontalGlue());
 		progressRow.add(smallLabel(myTeam.pct + "%", Color.WHITE));
 		body.add(progressRow);
@@ -390,11 +384,10 @@ public class BingoPanel extends PluginPanel
 		JPanel row = cappedColumn();
 
 		JPanel labelRow = cappedRow();
-		JLabel nameLabel = smallLabel(name, ColorScheme.TEXT_COLOR);
-		nameLabel.setFont(nameLabel.getFont().deriveFont(Font.BOLD));
+		JLabel nameLabel = smallLabel(name, Color.WHITE);
 		labelRow.add(nameLabel);
 		labelRow.add(Box.createHorizontalGlue());
-		labelRow.add(smallLabel(value, ColorScheme.LIGHT_GRAY_COLOR));
+		labelRow.add(smallLabel(value, Color.WHITE));
 		row.add(labelRow);
 		row.add(Box.createVerticalStrut(3));
 
@@ -459,46 +452,50 @@ public class BingoPanel extends PluginPanel
 
 	private JPanel leaderboardRow(int rank, BoardResponse.Team team, boolean mine)
 	{
-		JPanel row = capped(new BorderLayout(7, 0));
+		JPanel row = roundedRow(new BorderLayout(7, 0));
+		row.setBorder(new EmptyBorder(3, 4, 3, 4));
+		Color teamColor = parseColor(team.accentColor, NEUTRAL_SWATCH);
+		Color barColor = mine ? teamColor : NEUTRAL_SWATCH;
 		if (mine)
 		{
+			// A plain gray hover color didn't read as "your team" clearly enough — a translucent tint of
+			// the team's own accent color stands out regardless of what that color actually is.
 			row.setOpaque(true);
-			row.setBackground(ColorScheme.DARK_GRAY_HOVER_COLOR);
-			row.setBorder(new EmptyBorder(3, 4, 3, 4));
+			row.setBackground(new Color(
+				teamColor.getRed(),
+				teamColor.getGreen(),
+				teamColor.getBlue(),
+				50));
 		}
 
 		JLabel rankLabel = new JLabel(String.valueOf(rank));
 		rankLabel.setFont(FontManager.getRunescapeSmallFont().deriveFont(Font.BOLD));
-		rankLabel.setForeground(ColorScheme.MEDIUM_GRAY_COLOR);
+		rankLabel.setForeground(Color.WHITE);
 		rankLabel.setPreferredSize(new Dimension(16, rankLabel.getPreferredSize().height));
 		row.add(rankLabel, BorderLayout.WEST);
 
 		JPanel middle = cappedColumn();
 		middle.setOpaque(false);
 
-		Color teamColor = parseColor(team.accentColor, NEUTRAL_SWATCH);
-
 		JPanel nameRow = cappedRow();
 		nameRow.setOpaque(false);
-		nameRow.add(colorChip(teamColor, 9));
-		nameRow.add(Box.createHorizontalStrut(6));
 		JLabel nameLabel = new JLabel(team.name);
-		nameLabel.setFont(FontManager.getRunescapeSmallFont().deriveFont(mine ? Font.BOLD : Font.PLAIN));
-		nameLabel.setForeground(mine ? Color.WHITE : ColorScheme.TEXT_COLOR);
+		nameLabel.setFont(FontManager.getRunescapeSmallFont());
+		nameLabel.setForeground(mine ? teamColor : Color.WHITE);
 		nameRow.add(nameLabel);
 		middle.add(nameRow);
 		middle.add(Box.createVerticalStrut(4));
 
 		ProgressBar bar = new ProgressBar();
 		bar.setAlignmentX(Component.LEFT_ALIGNMENT);
-		bar.setProgress(team.pct / 100.0, mine ? ColorScheme.BRAND_ORANGE : ColorScheme.MEDIUM_GRAY_COLOR);
+		bar.setProgress(team.pct / 100.0, barColor);
 		middle.add(bar);
 
 		row.add(middle, BorderLayout.CENTER);
 
 		JLabel pctLabel = new JLabel(team.pct + "%");
 		pctLabel.setFont(FontManager.getRunescapeSmallFont());
-		pctLabel.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		pctLabel.setForeground(Color.WHITE);
 		pctLabel.setHorizontalAlignment(SwingConstants.RIGHT);
 		pctLabel.setPreferredSize(new Dimension(32, pctLabel.getPreferredSize().height));
 		row.add(pctLabel, BorderLayout.EAST);
@@ -520,7 +517,7 @@ public class BingoPanel extends PluginPanel
 		row.add(dot, BorderLayout.WEST);
 
 		statusLabel.setFont(FontManager.getRunescapeSmallFont());
-		statusLabel.setForeground(ColorScheme.MEDIUM_GRAY_COLOR);
+		statusLabel.setForeground(Color.WHITE);
 		statusLabel.setBorder(new EmptyBorder(6, 6, 0, 0));
 		updateStatusLabelText();
 		row.add(statusLabel, BorderLayout.CENTER);
@@ -595,7 +592,7 @@ public class BingoPanel extends PluginPanel
 		{
 			countLabel = new JLabel(count);
 			countLabel.setFont(FontManager.getRunescapeSmallFont());
-			countLabel.setForeground(ColorScheme.MEDIUM_GRAY_COLOR);
+			countLabel.setForeground(Color.WHITE);
 			headerRow.add(countLabel, BorderLayout.EAST);
 		}
 
@@ -639,32 +636,6 @@ public class BingoPanel extends PluginPanel
 		label.setFont(FontManager.getRunescapeSmallFont());
 		label.setForeground(color);
 		return label;
-	}
-
-	/**
-	 * A small solid, rounded color swatch — used in place of a "■"/"●" text glyph for a team's accent
-	 * color. A painted shape renders crisply at any size; a glyph's actual visual weight varies by font
-	 * and rounds oddly at small sizes.
-	 */
-	private static JPanel colorChip(Color color, int size)
-	{
-		JPanel chip = new JPanel()
-		{
-			@Override
-			protected void paintComponent(Graphics g)
-			{
-				Graphics2D g2 = (Graphics2D) g.create();
-				g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-				g2.setColor(color);
-				g2.fillRoundRect(0, 0, getWidth(), getHeight(), 3, 3);
-				g2.dispose();
-			}
-		};
-		chip.setOpaque(false);
-		chip.setPreferredSize(new Dimension(size, size));
-		chip.setMaximumSize(new Dimension(size, size));
-		chip.setAlignmentX(Component.LEFT_ALIGNMENT);
-		return chip;
 	}
 
 	private static Color parseColor(String hex, Color fallback)
@@ -738,6 +709,41 @@ public class BingoPanel extends PluginPanel
 		return panel;
 	}
 
+	private static final int ROUNDED_ROW_RADIUS = 8;
+
+	/**
+	 * Same height-capped behavior as {@link #capped}, but paints its own background (when
+	 * {@code setOpaque(true)} + {@code setBackground(...)} are used, as the leaderboard's "your team" row
+	 * does) as a rounded rect instead of Swing's default hard-cornered opaque fill.
+	 */
+	private static JPanel roundedRow(LayoutManager layout)
+	{
+		JPanel panel = new JPanel(layout)
+		{
+			@Override
+			public Dimension getMaximumSize()
+			{
+				return new Dimension(Integer.MAX_VALUE, getPreferredSize().height);
+			}
+
+			@Override
+			protected void paintComponent(Graphics g)
+			{
+				if (isOpaque())
+				{
+					Graphics2D g2 = (Graphics2D) g.create();
+					g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+					g2.setColor(getBackground());
+					g2.fillRoundRect(0, 0, getWidth(), getHeight(), ROUNDED_ROW_RADIUS, ROUNDED_ROW_RADIUS);
+					g2.dispose();
+				}
+			}
+		};
+		panel.setOpaque(false);
+		panel.setAlignmentX(Component.LEFT_ALIGNMENT);
+		return panel;
+	}
+
 	private static JPanel cappedColumn()
 	{
 		JPanel panel = capped(null);
@@ -763,7 +769,7 @@ public class BingoPanel extends PluginPanel
 		ProgressBar()
 		{
 			setOpaque(false);
-			setPreferredSize(new Dimension(10, 8));
+			setPreferredSize(new Dimension(10, 7));
 		}
 
 		void setProgress(double fraction, Color fillColor)
@@ -795,6 +801,8 @@ public class BingoPanel extends PluginPanel
 				g2.setColor(fillColor);
 				g2.fillRoundRect(0, 0, Math.max(fillW, h), h, h, h);
 			}
+			g2.setColor(Color.BLACK);
+			g2.drawRoundRect(0, 0, w - 1, h - 1, h, h);
 			g2.dispose();
 		}
 	}
@@ -932,10 +940,17 @@ public class BingoPanel extends PluginPanel
 			}
 		}
 
+		/**
+		 * Overrides {@code paint}, not {@code paintComponent} — {@code paintComponent} runs BEFORE Swing
+		 * paints this panel's children (the icon label), so drawing the badge there put it underneath the
+		 * item icon whenever the two overlapped in the corner. {@code paint} runs the whole
+		 * background+children+border sequence via {@code super.paint}, then this draws the badge on top of
+		 * all of it, so it's never covered by the icon.
+		 */
 		@Override
-		protected void paintComponent(Graphics g)
+		public void paint(Graphics g)
 		{
-			super.paintComponent(g);
+			super.paint(g);
 			if (state == State.EMPTY)
 			{
 				return;

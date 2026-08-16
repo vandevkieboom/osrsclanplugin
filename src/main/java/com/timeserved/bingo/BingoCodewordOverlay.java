@@ -11,8 +11,8 @@ import net.runelite.client.ui.overlay.OverlayPosition;
 import net.runelite.client.ui.overlay.components.LineComponent;
 
 /**
- * Shows the codeword and a live UTC timestamp on screen, ported directly from Wise Old Man's own
- * overlay ({@code net.wiseoldman.ui.CodeWordOverlay} in
+ * Shows the codeword (and, if enabled, a live UTC timestamp) on screen, ported directly from Wise
+ * Old Man's own overlay ({@code net.wiseoldman.ui.CodeWordOverlay} in
  * {@code wise-old-man/wiseoldman-runelite-plugin}) rather than reimplemented from screenshots.
  * It's a single RuneLite {@link LineComponent} (codeword on the left, timestamp on the right)
  * inside a resizable {@link OverlayPanel} — no custom paint code. The "sticky to the right",
@@ -23,9 +23,11 @@ import net.runelite.client.ui.overlay.components.LineComponent;
  * line(s)), and {@link OverlayPanel} already supplies the resize handles, background panel, and
  * border for free.
  *
- * <p>Unlike {@link BingoVerificationOverlay} (which only exists for a single frame to be baked
- * into a proof screenshot), this one sits on screen for the whole session when
- * {@link BingoConfig#showLiveCodewordOverlay} is on.
+ * <p>This is the only codeword overlay — there used to be a second one
+ * ({@code BingoVerificationOverlay}) that only rendered for the single frame a proof screenshot
+ * captured, so the codeword wouldn't sit on screen the whole session. That's been removed: if this
+ * overlay happens to be on when a proof screenshot is captured, {@code drawManager} picks it up
+ * like any other on-screen overlay, so a second, capture-only overlay was redundant.
  */
 class BingoCodewordOverlay extends OverlayPanel
 {
@@ -56,12 +58,15 @@ class BingoCodewordOverlay extends OverlayPanel
 			return null;
 		}
 
-		panelComponent.getChildren().add(LineComponent.builder()
+		LineComponent.LineComponentBuilder line = LineComponent.builder()
 			.left(codeword)
-			.leftColor(config.codewordColor())
-			.right(TIMESTAMP_FORMAT.format(Instant.now()))
-			.rightColor(config.timestampColor())
-			.build());
+			.leftColor(config.codewordColor());
+		if (config.showCodewordTimestamp())
+		{
+			line.right(TIMESTAMP_FORMAT.format(Instant.now()))
+				.rightColor(config.timestampColor());
+		}
+		panelComponent.getChildren().add(line.build());
 
 		return super.render(graphics);
 	}

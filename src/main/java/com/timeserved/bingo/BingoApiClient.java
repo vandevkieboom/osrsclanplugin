@@ -309,6 +309,81 @@ public class BingoApiClient
 		});
 	}
 
+	/** Result of a {@link #checkClanRequirement} call — mirrors GET /api/runeprofile-proxy?resource=clan-req. */
+	public static class ClanRequirementResult
+	{
+		public String rsn;
+
+		/** Whether this account satisfies the clan's hard gear/kc requirement. */
+		public boolean meets;
+
+		/** Which of the three checks passed (e.g. "Twisted Bow"), or null when meets is false. */
+		public String reason;
+	}
+
+	/**
+	 * Checks the clan's hard gear/kc requirement for the given RSN — the
+	 * same three-way check ("6+ Crystal Armour Seeds + an Enhanced Crystal
+	 * Weapon Seed", "800+ Corrupted Gauntlet kc", or "a Twisted Bow") the
+	 * site itself runs on its Clan Rankings page. Deliberately separate from
+	 * {@link #lookupRank}: that reports rank-tier eligibility, this reports
+	 * whether a much stricter, single gate is met — two different
+	 * questions, so two different commands/endpoints rather than one
+	 * overloaded reply.
+	 *
+	 * <p>No plugin key: same public-data reasoning as lookupRank.
+	 */
+	public void checkClanRequirement(String rsn, Consumer<ClanRequirementResult> onSuccess, BiConsumer<String, String> onError)
+	{
+		HttpUrl base = HttpUrl.parse(BASE_URL + "/api/runeprofile-proxy");
+		if (base == null)
+		{
+			onError.accept("Invalid API base URL", null);
+			return;
+		}
+
+		HttpUrl url = base.newBuilder()
+			.addQueryParameter("resource", "clan-req")
+			.addQueryParameter("rsn", rsn)
+			.build();
+
+		Request request = new Request.Builder()
+			.url(url)
+			.get()
+			.build();
+
+		httpClient.newCall(request).enqueue(new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException e)
+			{
+				log.debug("Failed to check clan requirement for {}", rsn, e);
+				onError.accept("Could not reach the clan site", null);
+			}
+
+			@Override
+			public void onResponse(Call call, Response response)
+			{
+				try (Response closeable = response)
+				{
+					ResponseBody body = closeable.body();
+					if (!closeable.isSuccessful() || body == null)
+					{
+						ErrorBody err = parseErrorBody(body);
+						onError.accept(describeFailure(closeable, err), err.reason);
+						return;
+					}
+					onSuccess.accept(gson.fromJson(body.charStream(), ClanRequirementResult.class));
+				}
+				catch (JsonSyntaxException e)
+				{
+					log.debug("Malformed clan requirement response", e);
+					onError.accept("The clan site returned an unexpected response", null);
+				}
+			}
+		});
+	}
+
 	/** One currently-live stream — mirrors GET /api/twitch-live's LiveStream shape. */
 	public static class LiveStream
 	{

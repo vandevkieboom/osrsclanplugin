@@ -86,10 +86,10 @@ public class BingoPlugin extends Plugin
 	private OverlayManager overlayManager;
 
 	@Inject
-	private BingoVerificationOverlay verificationOverlay;
+	private BingoCodewordOverlay codewordOverlay;
 
 	@Inject
-	private BingoCodewordOverlay codewordOverlay;
+	private WomEventClient womEventClient;
 
 	@Inject
 	private ChatCommandManager chatCommandManager;
@@ -109,23 +109,40 @@ public class BingoPlugin extends Plugin
 	private NavigationButton bingoNavButton;
 
 	/**
-	 * Runs the site's "Auto-Verify" rank check for the given name. "!verify
-	 * <name>" really is sent as a normal chat message, same as "!lvl" or
-	 * "!kc" — visible to everyone nearby, plugin or not. The looked-up
-	 * result then overwrites that message's displayed text (see
-	 * setChatReply below), the exact technique RuneLite's own bundled chat
-	 * commands use, which only ever affects local rendering: it shows up
-	 * for other viewers whose own client also has this command registered
-	 * (i.e. other Time Served Bingo plugin users), while anyone else just
-	 * sees the plain, unmodified "!verify <name>" they actually typed.
+	 * Runs the site's "Auto-Verify" rank check for the given name — what
+	 * this plugin's "!verify" command used to be before it was split in
+	 * two (see VERIFY_COMMAND below): "!rank" now reports which rank tier
+	 * someone is eligible for, while "!verify" checks the separate,
+	 * harder clan-gear requirement. "!rank <name>" really is sent as a
+	 * normal chat message, same as "!lvl" or "!kc" — visible to everyone
+	 * nearby, plugin or not. The looked-up result then overwrites that
+	 * message's displayed text (see setChatReply below), the exact
+	 * technique RuneLite's own bundled chat commands use, which only ever
+	 * affects local rendering: it shows up for other viewers whose own
+	 * client also has this command registered (i.e. other Time Served
+	 * Bingo plugin users), while anyone else just sees the plain,
+	 * unmodified "!rank <name>" they actually typed.
+	 */
+	private static final String RANK_COMMAND = "!rank";
+
+	/**
+	 * Checks whether a member meets the clan's hard gear/kc requirement —
+	 * the same three-way check ("Auto-Verify" used to just mean rank
+	 * eligibility; this is a separate, stricter gate) the site itself runs
+	 * on its Clan Rankings page: 6+ Crystal Armour Seeds plus an Enhanced
+	 * Crystal Weapon Seed, OR 800+ Corrupted Gauntlet kc, OR a Twisted
+	 * Bow. Same visible-reply mechanism as !rank — see setChatReply.
 	 */
 	private static final String VERIFY_COMMAND = "!verify";
 
-	/** Same visible-reply mechanism as !verify — see setChatReply. */
+	/** Same visible-reply mechanism as !rank — see setChatReply. */
 	private static final String NEEDED_COMMAND = "!needed";
 
-	/** Same visible-reply mechanism as !verify — see setChatReply. */
+	/** Same visible-reply mechanism as !rank — see setChatReply. */
 	private static final String LIVE_COMMAND = "!live";
+
+	/** Guards registerCommands()/unregisterCommands() so either is safe to call more than once in a row. */
+	private boolean commandsRegistered;
 
 	/**
 	 * Twitch usernames seen live on the last background check, so "Notify me
@@ -227,11 +244,11 @@ public class BingoPlugin extends Plugin
 	@Override
 	protected void startUp()
 	{
-		overlayManager.add(verificationOverlay);
 		overlayManager.add(codewordOverlay);
-		chatCommandManager.registerCommandAsync(VERIFY_COMMAND, this::onRankCommand);
-		chatCommandManager.registerCommandAsync(NEEDED_COMMAND, this::onNeededCommand);
-		chatCommandManager.registerCommandAsync(LIVE_COMMAND, this::onLiveCommand);
+		if (config.enableClanCommands())
+		{
+			registerCommands();
+		}
 
 		bingoNavButton = NavigationButton.builder()
 			.tooltip("Bingo")
@@ -287,11 +304,8 @@ public class BingoPlugin extends Plugin
 	@Override
 	protected void shutDown()
 	{
-		overlayManager.remove(verificationOverlay);
 		overlayManager.remove(codewordOverlay);
-		chatCommandManager.unregisterCommand(VERIFY_COMMAND);
-		chatCommandManager.unregisterCommand(NEEDED_COMMAND);
-		chatCommandManager.unregisterCommand(LIVE_COMMAND);
+		unregisterCommands();
 		clientToolbar.removeNavigation(bingoNavButton);
 		bingoPanel.dispose();
 		tilesByItemId.clear();
@@ -300,6 +314,34 @@ public class BingoPlugin extends Plugin
 		previouslyLiveUsernames = null;
 		checkedRuneProfileSync = false;
 		bingoActive = true;
+	}
+
+	/** Idempotent — safe to call when the commands are already registered (guarded by commandsRegistered). */
+	private void registerCommands()
+	{
+		if (commandsRegistered)
+		{
+			return;
+		}
+		chatCommandManager.registerCommandAsync(RANK_COMMAND, this::onRankCommand);
+		chatCommandManager.registerCommandAsync(VERIFY_COMMAND, this::onVerifyCommand);
+		chatCommandManager.registerCommandAsync(NEEDED_COMMAND, this::onNeededCommand);
+		chatCommandManager.registerCommandAsync(LIVE_COMMAND, this::onLiveCommand);
+		commandsRegistered = true;
+	}
+
+	/** Idempotent — safe to call when the commands aren't currently registered. */
+	private void unregisterCommands()
+	{
+		if (!commandsRegistered)
+		{
+			return;
+		}
+		chatCommandManager.unregisterCommand(RANK_COMMAND);
+		chatCommandManager.unregisterCommand(VERIFY_COMMAND);
+		chatCommandManager.unregisterCommand(NEEDED_COMMAND);
+		chatCommandManager.unregisterCommand(LIVE_COMMAND);
+		commandsRegistered = false;
 	}
 
 	@Subscribe
@@ -344,6 +386,17 @@ public class BingoPlugin extends Plugin
 				clientToolbar.removeNavigation(bingoNavButton);
 			}
 		}
+		else if ("enableClanCommands".equals(event.getKey()))
+		{
+			if (config.enableClanCommands())
+			{
+				registerCommands();
+			}
+			else
+			{
+				unregisterCommands();
+			}
+		}
 	}
 
 	/**
@@ -366,6 +419,7 @@ public class BingoPlugin extends Plugin
 		checkBingoStatus();
 		checkLiveStreams();
 		checkBroadcast();
+		checkWomEvents();
 	}
 
 	/**
@@ -509,11 +563,10 @@ public class BingoPlugin extends Plugin
 
 	private void captureAndSubmit(BoardResponse.Tile tile, int itemId, String itemName)
 	{
-		// On for exactly the frame this listener captures, then straight back off — see
-		// BingoVerificationOverlay's class doc for why this is a toggle and not "always visible".
-		verificationOverlay.setCaptureMode(true);
+		// Whatever's already on screen (including the codeword overlay, if the player has it on)
+		// just gets picked up as part of this frame like any other overlay — see
+		// BingoCodewordOverlay's class doc for why there's no separate capture-only overlay anymore.
 		drawManager.requestNextFrameListener(image -> {
-			verificationOverlay.setCaptureMode(false);
 			// Copy the frame before leaving the render callback: the Image the
 			// client hands over is not ours to keep.
 			BufferedImage frame = ImageUtil.bufferedImageFromImage(image);
@@ -670,13 +723,14 @@ public class BingoPlugin extends Plugin
 	}
 
 	/**
-	 * The clan commands (!verify, !needed, !live, the sync reminder) always
-	 * show their result regardless of the "Chat message on submit" toggle —
-	 * that setting is specifically about drop-submission notifications, not
-	 * a command the player just typed — which is also why they pass their
-	 * own clanMessageColor() here rather than sharing submitMessageColor: a
-	 * bingo drop notification and a clan command reply aren't the same kind
-	 * of message, so one color config shouldn't govern both.
+	 * The clan commands (!rank, !verify, !needed, !live, the sync reminder)
+	 * always show their result regardless of the "Chat message on submit"
+	 * toggle — that setting is specifically about drop-submission
+	 * notifications, not a command the player just typed — which is also
+	 * why they pass their own clanMessageColor() here rather than sharing
+	 * submitMessageColor: a bingo drop notification and a clan command
+	 * reply aren't the same kind of message, so one color config shouldn't
+	 * govern both.
 	 */
 	private void sendChatMessage(String message, Color color)
 	{
@@ -685,7 +739,7 @@ public class BingoPlugin extends Plugin
 	}
 
 	/**
-	 * Handles "!verify [name]" once it's actually been sent (this is
+	 * Handles "!rank [name]" once it's actually been sent (this is
 	 * registerCommandAsync's execute callback, run off the client thread
 	 * already). No name defaults to the sender — chatMessage.getName() is
 	 * this message's own author for a real sent message, so no client-thread
@@ -697,6 +751,27 @@ public class BingoPlugin extends Plugin
 	 */
 	private void onRankCommand(ChatMessage chatMessage, String message)
 	{
+		String rsn = commandArgument(message, RANK_COMMAND, chatMessage);
+		if (rsn.isEmpty())
+		{
+			sendChatMessage("Usage - " + RANK_COMMAND + " [name]", config.clanMessageColor());
+			return;
+		}
+
+		api.lookupRank(rsn,
+			result -> setChatReply(chatMessage, formatRankResult(result)),
+			(error, reason) -> setChatReply(chatMessage, describeRankError(rsn, error, reason)));
+	}
+
+	/**
+	 * Handles "!verify [name]" — same shape as !rank, but a different,
+	 * stricter check: the clan's hard gear/kc gate (see VERIFY_COMMAND's
+	 * doc) rather than the rank-tier ladder. Kept as its own command
+	 * rather than folded into !rank's reply since they answer genuinely
+	 * different questions ("what rank" vs. "do they meet the hard gate").
+	 */
+	private void onVerifyCommand(ChatMessage chatMessage, String message)
+	{
 		String rsn = commandArgument(message, VERIFY_COMMAND, chatMessage);
 		if (rsn.isEmpty())
 		{
@@ -704,8 +779,8 @@ public class BingoPlugin extends Plugin
 			return;
 		}
 
-		api.lookupRank(rsn,
-			result -> setChatReply(chatMessage, formatRankResult(result)),
+		api.checkClanRequirement(rsn,
+			result -> setChatReply(chatMessage, formatClanRequirementResult(result)),
 			(error, reason) -> setChatReply(chatMessage, describeRankError(rsn, error, reason)));
 	}
 
@@ -780,6 +855,14 @@ public class BingoPlugin extends Plugin
 	{
 		String eligible = result.eligibleRank != null ? result.eligibleRank : "no rank yet";
 		return result.rsn + " qualifies for " + eligible + " - " + result.overallSatisfied + "/" + result.overallTotal + " items";
+	}
+
+	private String formatClanRequirementResult(BingoApiClient.ClanRequirementResult result)
+	{
+		return result.meets
+			? result.rsn + " meets the clan requirements - " + result.reason
+			: result.rsn + " does not meet the clan requirements yet (needs 6 Crystal Armour Seeds + an"
+				+ " Enhanced Crystal Weapon Seed, 800+ Corrupted Gauntlet kc, or a Twisted Bow).";
 	}
 
 	private String formatNeededResult(BingoApiClient.RankLookupResult result)
@@ -938,5 +1021,51 @@ public class BingoPlugin extends Plugin
 				sendChatMessage(result.message, config.clanMessageColor());
 			},
 			error -> log.debug("Failed to check broadcast: {}", error));
+	}
+
+	private static final String LAST_ANNOUNCED_WOM_COMPETITION_KEY = "lastAnnouncedWomCompetition";
+
+	/**
+	 * Backs the "Wise Old Man competitions" toggle: announces once, in chat,
+	 * whenever a new Skill/Boss of the Week competition goes from "not
+	 * running" to "ongoing". The last-announced competition id is persisted
+	 * via ConfigManager, same reasoning as LAST_SEEN_BROADCAST_KEY above — an
+	 * in-memory-only flag would re-announce the same still-running
+	 * competition after every client restart. The very first check after
+	 * enabling this only seeds the stored id silently (same pattern as
+	 * previouslyLiveUsernames in checkLiveStreams) so a competition that's
+	 * already been running for days doesn't get announced as "new" just
+	 * because the plugin only just started watching.
+	 */
+	private void checkWomEvents()
+	{
+		if (!config.notifyWomEvents())
+		{
+			return;
+		}
+
+		womEventClient.fetchOngoingCompetition(
+			competition -> {
+				String lastAnnounced = configManager.getConfiguration(BingoConfig.GROUP, LAST_ANNOUNCED_WOM_COMPETITION_KEY);
+				if (competition == null)
+				{
+					return;
+				}
+				String id = String.valueOf(competition.id);
+				if (id.equals(lastAnnounced))
+				{
+					return;
+				}
+				configManager.setConfiguration(BingoConfig.GROUP, LAST_ANNOUNCED_WOM_COMPETITION_KEY, id);
+				if (lastAnnounced == null)
+				{
+					// First check ever — seed silently rather than announcing whatever's already running.
+					return;
+				}
+				sendChatMessage(
+					"New Wise Old Man competition: " + competition.title + " (" + competition.metric + ")",
+					config.clanMessageColor());
+			},
+			error -> log.debug("Failed to check Wise Old Man competitions: {}", error));
 	}
 }
