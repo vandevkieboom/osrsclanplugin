@@ -75,13 +75,37 @@ public interface BingoConfig extends Config
 		return true;
 	}
 
+	@ConfigItem(
+		keyName = "notifyWomEvents",
+		name = "Wise Old Man competitions",
+		description = "Post a chat message when a new Skill of the Week / Boss of the Week competition starts.",
+		section = clanSection,
+		position = 6
+	)
+	default boolean notifyWomEvents()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "enableClanCommands",
+		name = "Clan chat commands",
+		description = "Turn off the !rank, !verify, !needed, and !live chat commands entirely.",
+		section = clanSection,
+		position = 7
+	)
+	default boolean enableClanCommands()
+	{
+		return true;
+	}
+
 	@Alpha
 	@ConfigItem(
 		keyName = "clanMessageColor",
 		name = "Clan message color",
 		description = "Configure the color of clan chat messages, reminders, and broadcasts.",
 		section = clanSection,
-		position = 6
+		position = 8
 	)
 	default Color clanMessageColor()
 	{
@@ -94,6 +118,18 @@ public interface BingoConfig extends Config
 		position = 7
 	)
 	String bingoSection = "bingo";
+
+	@ConfigItem(
+		keyName = "showSidebar",
+		name = "Show sidebar",
+		description = "Show the bingo board tab in the sidebar. Turn off to hide the icon entirely.",
+		section = bingoSection,
+		position = 6
+	)
+	default boolean showSidebar()
+	{
+		return true;
+	}
 
 	@ConfigItem(
 		keyName = "notifyOnSubmit",
@@ -133,27 +169,68 @@ public interface BingoConfig extends Config
 	}
 
 	@ConfigItem(
-		keyName = "highlightGroundItems",
-		name = "Highlight bingo drops",
-		description = "Configure whether to show lootbeams for bingo drops.",
+		keyName = "verificationCode",
+		name = "Codeword",
+		description = "Whatever code your clan admin announced for the current event.",
 		section = bingoSection,
-		position = 10
+		position = 12
 	)
-	default boolean highlightGroundItems()
+	default String verificationCode()
+	{
+		return "";
+	}
+
+	@ConfigItem(
+		keyName = "showLiveCodewordOverlay",
+		name = "Display codeword",
+		description = "Show the codeword in a movable, resizable box on screen the whole session — drag it to"
+			+ " move, drag a corner to resize (squish it into a thin strip to save screen space). If it's on"
+			+ " when a bingo proof is captured, the codeword ends up baked into that screenshot too, the same"
+			+ " way any other on-screen overlay would.",
+		section = bingoSection,
+		position = 13
+	)
+	default boolean showLiveCodewordOverlay()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "showCodewordTimestamp",
+		name = "Show timestamp",
+		description = "Add a live UTC timestamp next to the codeword. Turning this off means a captured proof"
+			+ " screenshot no longer has anything proving *when* it was taken, just the codeword itself.",
+		section = bingoSection,
+		position = 14
+	)
+	default boolean showCodewordTimestamp()
 	{
 		return true;
 	}
 
 	@Alpha
 	@ConfigItem(
-		keyName = "groundItemHighlightColor",
-		name = "Highlight color",
-		description = "Configure the color of lootbeams for bingo drops.",
+		keyName = "codewordColor",
+		name = "Codeword color",
+		description = "Configure the color of the codeword text in the on-screen codeword overlay.",
 		section = bingoSection,
-		position = 11
+		position = 15
 	)
-	default Color groundItemHighlightColor()
+	default Color codewordColor()
 	{
-		return new Color(255, 215, 0, 180);
+		return new Color(0x00FF6A);
+	}
+
+	@Alpha
+	@ConfigItem(
+		keyName = "timestampColor",
+		name = "Timestamp color",
+		description = "Configure the color of the timestamp text in the on-screen codeword overlay.",
+		section = bingoSection,
+		position = 16
+	)
+	default Color timestampColor()
+	{
+		return new Color(0xFFFFFFFF, true);
 	}
 }

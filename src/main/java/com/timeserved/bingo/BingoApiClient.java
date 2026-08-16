@@ -39,7 +39,6 @@ public class BingoApiClient
 	 * param instead (see submitPluginProof in api/board.ts).
 	 */
 	private static final MediaType OCTET_STREAM = MediaType.parse("application/octet-stream");
-	private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 	private static final String SCREENSHOT_CONTENT_TYPE = "image/png";
 
 	private final OkHttpClient httpClient;
@@ -103,6 +102,63 @@ public class BingoApiClient
 		});
 	}
 
+	/** Just the "is a bingo event running" flag — see BingoStatus for why this is separate from fetchBoard. */
+	public static class BingoStatus
+	{
+		public boolean bingoActive;
+	}
+
+	/**
+	 * A deliberately tiny, unauthenticated, edge-cached check — cheap enough
+	 * to poll every minute regardless of whether bingo is even active,
+	 * unlike fetchBoard (which queries tiles/teams/submissions per request
+	 * and can't be blanket-cached since its response is personalized per
+	 * caller). This is what lets the plugin notice a re-activated event
+	 * within about a minute instead of needing a slow, infrequent full
+	 * board check to catch it.
+	 */
+	public void fetchBingoStatus(Consumer<BingoStatus> onSuccess, Consumer<String> onError)
+	{
+		HttpUrl url = HttpUrl.parse(BASE_URL + "/api/board?resource=status");
+		if (url == null)
+		{
+			onError.accept("Invalid API base URL");
+			return;
+		}
+
+		Request request = new Request.Builder().url(url).get().build();
+
+		httpClient.newCall(request).enqueue(new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException e)
+			{
+				log.debug("Failed to fetch bingo status", e);
+				onError.accept("Could not reach the clan site");
+			}
+
+			@Override
+			public void onResponse(Call call, Response response)
+			{
+				try (Response closeable = response)
+				{
+					ResponseBody body = closeable.body();
+					if (!closeable.isSuccessful() || body == null)
+					{
+						onError.accept(describeFailure(closeable, parseErrorBody(body)));
+						return;
+					}
+					onSuccess.accept(gson.fromJson(body.charStream(), BingoStatus.class));
+				}
+				catch (JsonSyntaxException e)
+				{
+					log.debug("Malformed bingo status response", e);
+					onError.accept("The clan site returned an unexpected response");
+				}
+			}
+		});
+	}
+
 	/**
 	 * Uploads a screenshot as proof for a tile. The server re-checks that the
 	 * item satisfies the tile and that the tile still needs proof, so a stale
@@ -157,65 +213,6 @@ public class BingoApiClient
 						return;
 					}
 					onError.accept(describeFailure(closeable, parseErrorBody(body)));
-				}
-			}
-		});
-	}
-
-	/**
-	 * Reports this member's current reading for a team-combined xp/kc goal
-	 * (see {@link BoardResponse.Tile#goalKind}). The server tracks each
-	 * member's own first-ever reading as their baseline and sums
-	 * (latest − baseline) across the team, so this is safe to call
-	 * repeatedly with the same or a higher value — there's no local state to
-	 * get out of sync with.
-	 */
-	public void reportProgress(
-		String apiKey,
-		String goalKind,
-		String goalKey,
-		long value,
-		Runnable onSuccess,
-		Consumer<String> onError)
-	{
-		HttpUrl url = HttpUrl.parse(BASE_URL + "/api/board");
-		if (url == null)
-		{
-			onError.accept("Invalid API base URL");
-			return;
-		}
-
-		JsonObject body = new JsonObject();
-		body.addProperty("goalKind", goalKind);
-		body.addProperty("goalKey", goalKey);
-		body.addProperty("value", value);
-
-		Request request = new Request.Builder()
-			.url(url.newBuilder().addQueryParameter("resource", "goal-progress").build())
-			.header("Authorization", "Bearer " + apiKey)
-			.post(RequestBody.create(JSON, gson.toJson(body)))
-			.build();
-
-		httpClient.newCall(request).enqueue(new Callback()
-		{
-			@Override
-			public void onFailure(Call call, IOException e)
-			{
-				log.debug("Failed to report bingo goal progress", e);
-				onError.accept("Could not reach the clan site");
-			}
-
-			@Override
-			public void onResponse(Call call, Response response)
-			{
-				try (Response closeable = response)
-				{
-					if (closeable.isSuccessful())
-					{
-						onSuccess.run();
-						return;
-					}
-					onError.accept(describeFailure(closeable, parseErrorBody(closeable.body())));
 				}
 			}
 		});
@@ -306,6 +303,81 @@ public class BingoApiClient
 				catch (JsonSyntaxException e)
 				{
 					log.debug("Malformed rank lookup response", e);
+					onError.accept("The clan site returned an unexpected response", null);
+				}
+			}
+		});
+	}
+
+	/** Result of a {@link #checkClanRequirement} call — mirrors GET /api/runeprofile-proxy?resource=clan-req. */
+	public static class ClanRequirementResult
+	{
+		public String rsn;
+
+		/** Whether this account satisfies the clan's hard gear/kc requirement. */
+		public boolean meets;
+
+		/** Which of the three checks passed (e.g. "Twisted Bow"), or null when meets is false. */
+		public String reason;
+	}
+
+	/**
+	 * Checks the clan's hard gear/kc requirement for the given RSN — the
+	 * same three-way check ("6+ Crystal Armour Seeds + an Enhanced Crystal
+	 * Weapon Seed", "800+ Corrupted Gauntlet kc", or "a Twisted Bow") the
+	 * site itself runs on its Clan Rankings page. Deliberately separate from
+	 * {@link #lookupRank}: that reports rank-tier eligibility, this reports
+	 * whether a much stricter, single gate is met — two different
+	 * questions, so two different commands/endpoints rather than one
+	 * overloaded reply.
+	 *
+	 * <p>No plugin key: same public-data reasoning as lookupRank.
+	 */
+	public void checkClanRequirement(String rsn, Consumer<ClanRequirementResult> onSuccess, BiConsumer<String, String> onError)
+	{
+		HttpUrl base = HttpUrl.parse(BASE_URL + "/api/runeprofile-proxy");
+		if (base == null)
+		{
+			onError.accept("Invalid API base URL", null);
+			return;
+		}
+
+		HttpUrl url = base.newBuilder()
+			.addQueryParameter("resource", "clan-req")
+			.addQueryParameter("rsn", rsn)
+			.build();
+
+		Request request = new Request.Builder()
+			.url(url)
+			.get()
+			.build();
+
+		httpClient.newCall(request).enqueue(new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException e)
+			{
+				log.debug("Failed to check clan requirement for {}", rsn, e);
+				onError.accept("Could not reach the clan site", null);
+			}
+
+			@Override
+			public void onResponse(Call call, Response response)
+			{
+				try (Response closeable = response)
+				{
+					ResponseBody body = closeable.body();
+					if (!closeable.isSuccessful() || body == null)
+					{
+						ErrorBody err = parseErrorBody(body);
+						onError.accept(describeFailure(closeable, err), err.reason);
+						return;
+					}
+					onSuccess.accept(gson.fromJson(body.charStream(), ClanRequirementResult.class));
+				}
+				catch (JsonSyntaxException e)
+				{
+					log.debug("Malformed clan requirement response", e);
 					onError.accept("The clan site returned an unexpected response", null);
 				}
 			}

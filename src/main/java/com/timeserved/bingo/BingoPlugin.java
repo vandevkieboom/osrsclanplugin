@@ -20,9 +20,6 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import javax.imageio.ImageIO;
 import javax.inject.Inject;
 import javax.swing.SwingUtilities;
@@ -32,13 +29,8 @@ import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.MessageNode;
 import net.runelite.api.Player;
-import net.runelite.api.Skill;
-import net.runelite.api.TileItem;
-import net.runelite.api.coords.LocalPoint;
 import net.runelite.api.events.ChatMessage;
 import net.runelite.api.events.GameStateChanged;
-import net.runelite.api.events.ItemDespawned;
-import net.runelite.api.events.ItemSpawned;
 import net.runelite.api.gameval.AnimationID;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.chat.ChatCommandManager;
@@ -94,7 +86,10 @@ public class BingoPlugin extends Plugin
 	private OverlayManager overlayManager;
 
 	@Inject
-	private BingoGroundItemsOverlay groundItemsOverlay;
+	private BingoCodewordOverlay codewordOverlay;
+
+	@Inject
+	private WomEventClient womEventClient;
 
 	@Inject
 	private ChatCommandManager chatCommandManager;
@@ -108,26 +103,46 @@ public class BingoPlugin extends Plugin
 	@Inject
 	private BingoPanel bingoPanel;
 
+	@Inject
+	private PendingSubmissionStore pendingStore;
+
 	private NavigationButton bingoNavButton;
 
 	/**
-	 * Runs the site's "Auto-Verify" rank check for the given name. "!verify
-	 * <name>" really is sent as a normal chat message, same as "!lvl" or
-	 * "!kc" — visible to everyone nearby, plugin or not. The looked-up
-	 * result then overwrites that message's displayed text (see
-	 * setChatReply below), the exact technique RuneLite's own bundled chat
-	 * commands use, which only ever affects local rendering: it shows up
-	 * for other viewers whose own client also has this command registered
-	 * (i.e. other Time Served Bingo plugin users), while anyone else just
-	 * sees the plain, unmodified "!verify <name>" they actually typed.
+	 * Runs the site's "Auto-Verify" rank check for the given name — what
+	 * this plugin's "!verify" command used to be before it was split in
+	 * two (see VERIFY_COMMAND below): "!rank" now reports which rank tier
+	 * someone is eligible for, while "!verify" checks the separate,
+	 * harder clan-gear requirement. "!rank <name>" really is sent as a
+	 * normal chat message, same as "!lvl" or "!kc" — visible to everyone
+	 * nearby, plugin or not. The looked-up result then overwrites that
+	 * message's displayed text (see setChatReply below), the exact
+	 * technique RuneLite's own bundled chat commands use, which only ever
+	 * affects local rendering: it shows up for other viewers whose own
+	 * client also has this command registered (i.e. other Time Served
+	 * Bingo plugin users), while anyone else just sees the plain,
+	 * unmodified "!rank <name>" they actually typed.
+	 */
+	private static final String RANK_COMMAND = "!rank";
+
+	/**
+	 * Checks whether a member meets the clan's hard gear/kc requirement —
+	 * the same three-way check ("Auto-Verify" used to just mean rank
+	 * eligibility; this is a separate, stricter gate) the site itself runs
+	 * on its Clan Rankings page: 6+ Crystal Armour Seeds plus an Enhanced
+	 * Crystal Weapon Seed, OR 800+ Corrupted Gauntlet kc, OR a Twisted
+	 * Bow. Same visible-reply mechanism as !rank — see setChatReply.
 	 */
 	private static final String VERIFY_COMMAND = "!verify";
 
-	/** Same visible-reply mechanism as !verify — see setChatReply. */
+	/** Same visible-reply mechanism as !rank — see setChatReply. */
 	private static final String NEEDED_COMMAND = "!needed";
 
-	/** Same visible-reply mechanism as !verify — see setChatReply. */
+	/** Same visible-reply mechanism as !rank — see setChatReply. */
 	private static final String LIVE_COMMAND = "!live";
+
+	/** Guards registerCommands()/unregisterCommands() so either is safe to call more than once in a row. */
+	private boolean commandsRegistered;
 
 	/**
 	 * Twitch usernames seen live on the last background check, so "Notify me
@@ -142,46 +157,39 @@ public class BingoPlugin extends Plugin
 	private boolean checkedRuneProfileSync;
 
 	/**
+	 * Whether the site last reported an active bingo event. Kept current by
+	 * checkBingoStatus, a separate, deliberately tiny/cheap/cached request
+	 * (see BingoApiClient#fetchBingoStatus) that runs every scheduled tick
+	 * regardless of this value — unlike the actual board fetch, which is
+	 * expensive (tiles/teams/submissions) and only ever runs while this is
+	 * true. Defaults true so the plugin behaves normally until it's actually
+	 * heard otherwise, rather than starting paused on a fresh session.
+	 */
+	private volatile boolean bingoActive = true;
+
+	/**
 	 * Item id -> the tiles it can satisfy, for this player's own team only.
 	 * Replaced wholesale on refresh; read from the client thread on every loot
 	 * event, so it's a concurrent map rather than a plain one.
 	 */
 	private final Map<Integer, List<BoardResponse.Tile>> tilesByItemId = new ConcurrentHashMap<>();
 
-	/** Lowercased skill name -> the team-xp tile watching it. */
-	private volatile Map<String, BoardResponse.Tile> xpTilesBySkill = Collections.emptyMap();
-
-	/** Lowercased boss name -> the team-kc tile watching it. */
-	private volatile Map<String, BoardResponse.Tile> kcTilesByBoss = Collections.emptyMap();
-
-	/** Ground items currently visible whose id satisfies an outstanding tile. */
-	private final Map<TileItem, TrackedGroundItem> trackedGroundItems = new ConcurrentHashMap<>();
-
-	/** A tracked ground item's real 3D loot beam, plus what to label it with. */
-	static class TrackedGroundItem
-	{
-		final LocalPoint location;
-		final String tileName;
-		final BingoLootbeam beam;
-
-		TrackedGroundItem(LocalPoint location, String tileName, BingoLootbeam beam)
-		{
-			this.location = location;
-			this.tileName = tileName;
-			this.beam = beam;
-		}
-	}
-
-	/** Screenshots that failed to upload over the network, waiting to retry. */
-	private final Deque<PendingSubmission> retryQueue = new ConcurrentLinkedDeque<>();
+	/**
+	 * Drop proofs that failed to send over the network, waiting to retry.
+	 * Backed by PendingSubmissionStore, which mirrors every entry to disk —
+	 * startUp() reloads whatever survived a previous session, so a client
+	 * restart mid-outage no longer silently loses a real drop with no way
+	 * to reconstruct it afterwards.
+	 */
+	private final Deque<PendingSubmissionStore.PendingItem> retryQueue = new ConcurrentLinkedDeque<>();
 
 	/**
-	 * Caps how many failed screenshots this plugin holds in memory at once —
-	 * deliberately small and in-memory only (nothing persisted to disk), so a
-	 * prolonged outage drops the oldest queued screenshot rather than growing
-	 * without bound.
+	 * Caps how many failed items this plugin holds in memory (and thus on
+	 * disk) at once. Generous rather than tight, now that a restart can't
+	 * wipe the queue — this just bounds a genuinely prolonged, unresolved
+	 * outage rather than protecting against a restart the way it used to.
 	 */
-	private static final int MAX_RETRY_QUEUE = 20;
+	private static final int MAX_RETRY_QUEUE = 100;
 
 	/**
 	 * Tile id -> when it was last attempted (submitted or refused). This exists
@@ -198,18 +206,17 @@ public class BingoPlugin extends Plugin
 	 * until the next board refresh.
 	 */
 	private final Map<String, Long> recentAttempts = new ConcurrentHashMap<>();
-	private static final long DEDUPE_WINDOW_MILLIS = TimeUnit.SECONDS.toMillis(30);
-
-	/**
-	 * Matches OSRS's generic "kill count" family of chat messages ("Your
-	 * Zulrah kill count is: 50.", "...completion count for...", "...lap
-	 * count is:...", etc). Mirrors KILLCOUNT_PATTERN in RuneLite's own
-	 * bundled ChatCommandsPlugin.
-	 */
-	private static final Pattern KILLCOUNT_PATTERN = Pattern.compile(
-		"Your (?<pre>completion count for |subdued |completed )?(?:<col=[0-9a-f]{6}>)?(?<boss>.+?)(?:</col>)? "
-			+ "(?<post>(?:(?:kill|harvest|lap|completion|success|Total Ticket) )?(?:count )?)"
-			+ "is: ?<col=[0-9a-f]{6}>(?<kc>[0-9,]+)</col>");
+	// 2 game ticks (a tick is 600ms) — comfortably longer than the gap between
+	// NpcLootReceived and LootReceived firing for the SAME kill (they land in
+	// the same tick, or very close), but short enough that genuinely separate
+	// kills seconds apart are never mistaken for duplicates. This used to be
+	// 30 seconds, which was a real bug: rapid-killing a fast-dying, fast-
+	// respawning monster (e.g. farming bones from something weak) meant only
+	// the FIRST kill in any 30-second span ever got submitted — every other
+	// real, separate kill in that window was silently dropped, since this
+	// cache is keyed on tile id alone with no idea whether a later hit is a
+	// genuine new kill or the same kill's duplicate event.
+	private static final long DEDUPE_WINDOW_MILLIS = 1200L;
 
 	private boolean recentlyAttempted(String tileId)
 	{
@@ -237,10 +244,11 @@ public class BingoPlugin extends Plugin
 	@Override
 	protected void startUp()
 	{
-		overlayManager.add(groundItemsOverlay);
-		chatCommandManager.registerCommandAsync(VERIFY_COMMAND, this::onRankCommand);
-		chatCommandManager.registerCommandAsync(NEEDED_COMMAND, this::onNeededCommand);
-		chatCommandManager.registerCommandAsync(LIVE_COMMAND, this::onLiveCommand);
+		overlayManager.add(codewordOverlay);
+		if (config.enableClanCommands())
+		{
+			registerCommands();
+		}
 
 		bingoNavButton = NavigationButton.builder()
 			.tooltip("Bingo")
@@ -248,7 +256,20 @@ public class BingoPlugin extends Plugin
 			.priority(5)
 			.panel(bingoPanel)
 			.build();
-		clientToolbar.addNavigation(bingoNavButton);
+		if (config.showSidebar())
+		{
+			clientToolbar.addNavigation(bingoNavButton);
+		}
+
+		List<PendingSubmissionStore.PendingItem> restored = pendingStore.loadAll();
+		if (!restored.isEmpty())
+		{
+			log.debug("Restored {} pending submission(s) from a previous session", restored.size());
+		}
+		for (PendingSubmissionStore.PendingItem item : restored)
+		{
+			enqueueRetry(item);
+		}
 
 		refreshBoard();
 	}
@@ -283,30 +304,44 @@ public class BingoPlugin extends Plugin
 	@Override
 	protected void shutDown()
 	{
-		overlayManager.remove(groundItemsOverlay);
-		chatCommandManager.unregisterCommand(VERIFY_COMMAND);
-		chatCommandManager.unregisterCommand(NEEDED_COMMAND);
-		chatCommandManager.unregisterCommand(LIVE_COMMAND);
+		overlayManager.remove(codewordOverlay);
+		unregisterCommands();
 		clientToolbar.removeNavigation(bingoNavButton);
 		bingoPanel.dispose();
 		tilesByItemId.clear();
 		recentAttempts.clear();
-		for (TrackedGroundItem tracked : trackedGroundItems.values())
-		{
-			tracked.beam.remove();
-		}
-		trackedGroundItems.clear();
 		retryQueue.clear();
-		warnedUnrecognisedSkills.clear();
-		xpTilesBySkill = Collections.emptyMap();
-		kcTilesByBoss = Collections.emptyMap();
 		previouslyLiveUsernames = null;
 		checkedRuneProfileSync = false;
+		bingoActive = true;
 	}
 
-	Map<TileItem, TrackedGroundItem> getTrackedGroundItems()
+	/** Idempotent — safe to call when the commands are already registered (guarded by commandsRegistered). */
+	private void registerCommands()
 	{
-		return trackedGroundItems;
+		if (commandsRegistered)
+		{
+			return;
+		}
+		chatCommandManager.registerCommandAsync(RANK_COMMAND, this::onRankCommand);
+		chatCommandManager.registerCommandAsync(VERIFY_COMMAND, this::onVerifyCommand);
+		chatCommandManager.registerCommandAsync(NEEDED_COMMAND, this::onNeededCommand);
+		chatCommandManager.registerCommandAsync(LIVE_COMMAND, this::onLiveCommand);
+		commandsRegistered = true;
+	}
+
+	/** Idempotent — safe to call when the commands aren't currently registered. */
+	private void unregisterCommands()
+	{
+		if (!commandsRegistered)
+		{
+			return;
+		}
+		chatCommandManager.unregisterCommand(RANK_COMMAND);
+		chatCommandManager.unregisterCommand(VERIFY_COMMAND);
+		chatCommandManager.unregisterCommand(NEEDED_COMMAND);
+		chatCommandManager.unregisterCommand(LIVE_COMMAND);
+		commandsRegistered = false;
 	}
 
 	@Subscribe
@@ -314,7 +349,16 @@ public class BingoPlugin extends Plugin
 	{
 		if (event.getGameState() == GameState.LOGGED_IN)
 		{
-			refreshBoard();
+			// Fires on every area/instance load, not just a literal login —
+			// during something like raids or minigames this can happen many
+			// times in quick succession, so the expensive board fetch only
+			// runs here if bingo is actually active; checkBingoStatus's next
+			// tick picks up a reactivation regardless of how long it's been
+			// since this last fired.
+			if (bingoActive)
+			{
+				refreshBoard();
+			}
 			checkRuneProfileSync();
 			checkBroadcast();
 		}
@@ -323,30 +367,94 @@ public class BingoPlugin extends Plugin
 	@Subscribe
 	public void onConfigChanged(ConfigChanged event)
 	{
-		if (BingoConfig.GROUP.equals(event.getGroup()) && "apiKey".equals(event.getKey()))
+		if (!BingoConfig.GROUP.equals(event.getGroup()))
+		{
+			return;
+		}
+		if ("apiKey".equals(event.getKey()))
 		{
 			refreshBoard();
+		}
+		else if ("showSidebar".equals(event.getKey()))
+		{
+			if (config.showSidebar())
+			{
+				clientToolbar.addNavigation(bingoNavButton);
+			}
+			else
+			{
+				clientToolbar.removeNavigation(bingoNavButton);
+			}
+		}
+		else if ("enableClanCommands".equals(event.getKey()))
+		{
+			if (config.enableClanCommands())
+			{
+				registerCommands();
+			}
+			else
+			{
+				unregisterCommands();
+			}
 		}
 	}
 
 	/**
-	 * Tiles get completed by teammates too, so the local copy (item ids to
-	 * watch for, xp/kc tiles to report to) goes stale on its own even when
-	 * this client sees no drops. A minute is frequent enough to stay
-	 * reasonably current for a small clan without hammering the API; this
-	 * player's own actions (see the refreshBoard() calls after a successful
-	 * submit/report below) update instantly regardless. Also drains the
-	 * retry queue — no need for a separate, faster schedule for that.
+	 * Runs every minute for every plugin user, forever — this is a general
+	 * clan tool (chat commands, live-stream/broadcast notifications), not a
+	 * bingo-only one, so most installs run this whether or not a bingo event
+	 * even exists. checkBingoStatus is a deliberately tiny, cached, near-free
+	 * request (see BingoApiClient#fetchBingoStatus) that's cheap enough to
+	 * run every tick regardless — the actual expensive work (refreshBoard,
+	 * which queries tiles/teams/submissions) only happens on ticks where
+	 * that check says a bingo event is genuinely active, so there's nothing
+	 * bingo-related running at all beyond one tiny cached ping while no
+	 * event is on. checkLiveStreams/checkBroadcast stay on this same
+	 * 1-minute cadence unconditionally — going live or an admin broadcast
+	 * are both things worth surfacing promptly.
 	 */
 	@Schedule(period = 1, unit = ChronoUnit.MINUTES, asynchronous = true)
 	public void scheduledRefresh()
 	{
-		refreshBoard();
-		retryPendingSubmissions();
+		checkBingoStatus();
 		checkLiveStreams();
 		checkBroadcast();
+		checkWomEvents();
 	}
 
+	/**
+	 * The only thing that runs every tick regardless of whether bingo is
+	 * active — see fetchBingoStatus's doc for why this is safe to do at
+	 * this frequency. Triggers the real (expensive) refreshBoard only once
+	 * this comes back true; otherwise nothing bingo-related happens this
+	 * tick at all.
+	 */
+	private void checkBingoStatus()
+	{
+		api.fetchBingoStatus(
+			status -> {
+				bingoActive = status.bingoActive;
+				if (bingoActive)
+				{
+					refreshBoard();
+					retryPendingSubmissions();
+				}
+			},
+			error -> log.debug("Failed to check bingo status: {}", error));
+	}
+
+	/**
+	 * Fetches the board and rebuilds the item-id lookup that handleLoot()
+	 * checks drops against. Team-combined xp/kc tiles need no plugin-side
+	 * reporting at all — their progress comes entirely from the website's
+	 * own hiscores polling (see osrsclan/api/_lib/board.ts), so this only
+	 * ever has to watch for item drops.
+	 *
+	 * <p>Called directly (bypassing checkBingoStatus's gate) from
+	 * startUp/onGameStateChanged/onConfigChanged/onSubmitted — a login, a
+	 * key change, or a real submission always gets an immediate, real check
+	 * rather than waiting on the next scheduled tick.
+	 */
 	private void refreshBoard()
 	{
 		String apiKey = config.apiKey().trim();
@@ -354,8 +462,6 @@ public class BingoPlugin extends Plugin
 		{
 			tilesByItemId.clear();
 			recentAttempts.clear();
-			xpTilesBySkill = Collections.emptyMap();
-			kcTilesByBoss = Collections.emptyMap();
 			SwingUtilities.invokeLater(bingoPanel::showNoApiKey);
 			return;
 		}
@@ -369,205 +475,23 @@ public class BingoPlugin extends Plugin
 				List<BoardResponse.Tile> tiles = myTeam == null ? Collections.emptyList() : myTeam.getTiles();
 
 				Map<Integer, List<BoardResponse.Tile>> nextItemLookup = new HashMap<>();
-				Map<String, BoardResponse.Tile> nextXpTiles = new HashMap<>();
-				Map<String, BoardResponse.Tile> nextKcTiles = new HashMap<>();
 				for (BoardResponse.Tile tile : tiles)
 				{
-					if (tile.isXpGoal())
+					if (tile.isXpGoal() || tile.isKcGoal())
 					{
-						nextXpTiles.put(tile.goalKey.trim().toLowerCase(), tile);
+						continue;
 					}
-					else if (tile.isKcGoal())
+					for (Integer itemId : tile.getItemIds())
 					{
-						nextKcTiles.put(tile.goalKey.trim().toLowerCase(), tile);
-					}
-					else
-					{
-						for (Integer itemId : tile.getItemIds())
-						{
-							nextItemLookup.computeIfAbsent(itemId, id -> new ArrayList<>()).add(tile);
-						}
+						nextItemLookup.computeIfAbsent(itemId, id -> new ArrayList<>()).add(tile);
 					}
 				}
 
 				tilesByItemId.clear();
 				tilesByItemId.putAll(nextItemLookup);
-				xpTilesBySkill = nextXpTiles;
-				kcTilesByBoss = nextKcTiles;
-				reportXpProgress(apiKey, nextXpTiles);
-				log.debug("Bingo board refreshed: watching {} item ids, {} xp tiles, {} kc tiles",
-					nextItemLookup.size(), nextXpTiles.size(), nextKcTiles.size());
+				log.debug("Bingo board refreshed: watching {} item ids", nextItemLookup.size());
 			},
 			error -> log.debug("Bingo board refresh failed: {}", error));
-	}
-
-	/** goalKeys we've already warned about once, so a bad tile doesn't spam chat every refresh. */
-	private final Set<String> warnedUnrecognisedSkills = ConcurrentHashMap.newKeySet();
-
-	/**
-	 * Reads this player's current xp for every skill an active team-xp tile
-	 * watches and reports it. Safe to call on every refresh — the server
-	 * tracks each member's own baseline and only a rising reading ever moves
-	 * the team total, so re-reporting the same or a lower value is a no-op.
-	 */
-	private void reportXpProgress(String apiKey, Map<String, BoardResponse.Tile> xpTiles)
-	{
-		if (xpTiles.isEmpty())
-		{
-			return;
-		}
-
-		clientThread.invokeLater(() -> {
-			// Guards against a real correctness bug: startUp() calls
-			// refreshBoard() unconditionally, which can happen before a
-			// character is even loaded (e.g. still on the login screen).
-			// getSkillExperience() would read 0 in that case, and since a
-			// player's *first-ever* report becomes their permanent
-			// baseline server-side, that 0 would wrongly credit their
-			// entire lifetime xp in that skill to the tile. Skipping the
-			// whole cycle here is harmless — the next refresh after actual
-			// login (onGameStateChanged already triggers one) reports the
-			// real reading instead.
-			if (client.getGameState() != GameState.LOGGED_IN)
-			{
-				return;
-			}
-
-			for (Map.Entry<String, BoardResponse.Tile> entry : xpTiles.entrySet())
-			{
-				Skill skill = skillFromName(entry.getKey());
-				if (skill == null)
-				{
-					continue;
-				}
-				long xp = client.getSkillExperience(skill);
-				BoardResponse.Tile tile = entry.getValue();
-				// No refreshBoard() on success here, unlike the kc report
-				// below — this call is itself made from inside
-				// refreshBoard()'s own callback, so that would recurse
-				// forever. The next scheduled refresh picks up the new total.
-				api.reportProgress(apiKey, "xp", tile.goalKey, xp,
-					() -> {},
-					error -> log.debug("Failed to report {} xp: {}", skill, error));
-			}
-		});
-	}
-
-	/**
-	 * Matches a tile's goalKey against a real skill, tolerating the two
-	 * mismatches an admin is actually likely to type: the old "Runecrafting"
-	 * name (OSRS renamed it to "Runecraft") and the American "Defense"
-	 * spelling (OSRS uses "Defence"). Anything else that still doesn't match
-	 * gets a one-time chat warning instead of failing invisibly — a typo'd
-	 * skill name would otherwise silently never report, with the only trace
-	 * being a debug-level log line nobody sees.
-	 */
-	private Skill skillFromName(String name)
-	{
-		String normalized = name.trim().toLowerCase();
-		if ("runecrafting".equals(normalized))
-		{
-			normalized = "runecraft";
-		}
-		else if ("defense".equals(normalized))
-		{
-			normalized = "defence";
-		}
-
-		try
-		{
-			return Skill.valueOf(normalized.toUpperCase());
-		}
-		catch (IllegalArgumentException e)
-		{
-			if (warnedUnrecognisedSkills.add(normalized))
-			{
-				notifyPlayer("\"" + name + "\" on your team's board isn't a real skill name — ask an admin to fix that tile.");
-			}
-			return null;
-		}
-	}
-
-	@Subscribe
-	public void onChatMessage(ChatMessage chatMessage)
-	{
-		ChatMessageType type = chatMessage.getType();
-		if (type != ChatMessageType.TRADE && type != ChatMessageType.GAMEMESSAGE
-			&& type != ChatMessageType.SPAM && type != ChatMessageType.FRIENDSCHATNOTIFICATION)
-		{
-			return;
-		}
-
-		Map<String, BoardResponse.Tile> kcTiles = kcTilesByBoss;
-		if (kcTiles.isEmpty())
-		{
-			return;
-		}
-
-		Matcher matcher = KILLCOUNT_PATTERN.matcher(chatMessage.getMessage());
-		if (!matcher.find())
-		{
-			return;
-		}
-
-		BoardResponse.Tile tile = kcTiles.get(matcher.group("boss").trim().toLowerCase());
-		if (tile == null)
-		{
-			return;
-		}
-
-		long kc;
-		try
-		{
-			kc = Long.parseLong(matcher.group("kc").replace(",", ""));
-		}
-		catch (NumberFormatException e)
-		{
-			return;
-		}
-
-		String apiKey = config.apiKey().trim();
-		if (apiKey.isEmpty())
-		{
-			return;
-		}
-		// Unlike the xp report below, this one is safe to follow with a
-		// refresh: it's not itself running inside refreshBoard()'s callback,
-		// so there's no risk of looping — just an instant panel update the
-		// moment a tracked kill count ticks over.
-		api.reportProgress(apiKey, "kc", tile.goalKey, kc,
-			this::refreshBoard,
-			error -> log.debug("Failed to report {} kc: {}", tile.goalKey, error));
-	}
-
-	@Subscribe
-	public void onItemSpawned(ItemSpawned event)
-	{
-		if (!config.highlightGroundItems())
-		{
-			return;
-		}
-		List<BoardResponse.Tile> candidates = tilesByItemId.get(event.getItem().getId());
-		if (candidates == null || candidates.isEmpty())
-		{
-			return;
-		}
-
-		BingoLootbeam beam = new BingoLootbeam(
-			client, clientThread, event.getTile().getWorldLocation(),
-			config.groundItemHighlightColor(), BingoLootbeam.Style.MODERN);
-		trackedGroundItems.put(event.getItem(),
-			new TrackedGroundItem(event.getTile().getLocalLocation(), candidates.get(0).name, beam));
-	}
-
-	@Subscribe
-	public void onItemDespawned(ItemDespawned event)
-	{
-		TrackedGroundItem tracked = trackedGroundItems.remove(event.getItem());
-		if (tracked != null)
-		{
-			tracked.beam.remove();
-		}
 	}
 
 	@Subscribe
@@ -639,6 +563,9 @@ public class BingoPlugin extends Plugin
 
 	private void captureAndSubmit(BoardResponse.Tile tile, int itemId, String itemName)
 	{
+		// Whatever's already on screen (including the codeword overlay, if the player has it on)
+		// just gets picked up as part of this frame like any other overlay — see
+		// BingoCodewordOverlay's class doc for why there's no separate capture-only overlay anymore.
 		drawManager.requestNextFrameListener(image -> {
 			// Copy the frame before leaving the render callback: the Image the
 			// client hands over is not ours to keep.
@@ -664,7 +591,6 @@ public class BingoPlugin extends Plugin
 			return;
 		}
 
-		PendingSubmission submission = new PendingSubmission(tile, itemId, itemName, png);
 		api.submitProof(
 			config.apiKey().trim(),
 			tile.tileId,
@@ -673,30 +599,36 @@ public class BingoPlugin extends Plugin
 			() -> onSubmitted(itemName, tile.name),
 			error -> {
 				// A transport failure is worth retrying — both immediately on
-				// the next matching drop (the 30s dedupe window, not "forever",
-				// is what lets a genuine re-drop after a later admin rejection
-				// go through) and via the retry queue in case no further drop
+				// the next matching drop (the dedupe window, not "forever", is
+				// what lets a genuine re-drop after a later admin rejection go
+				// through) and via the retry queue in case no further drop
 				// ever comes. A rejection from the server is neither.
 				if ("Could not reach the clan site".equals(error))
 				{
 					recentAttempts.remove(tile.tileId);
-					enqueueRetry(submission);
+					PendingSubmissionStore.PendingItem item = pendingStore.saveProof(tile.tileId, tile.name, itemId, itemName, png);
+					if (item != null)
+					{
+						enqueueRetry(item);
+					}
 				}
 				notifyPlayer(itemName + " not submitted — " + error);
 			});
 	}
 
-	private void enqueueRetry(PendingSubmission submission)
+	/** Adds an item to the in-memory retry queue, evicting (and deleting from disk) the oldest if it's full. */
+	private void enqueueRetry(PendingSubmissionStore.PendingItem item)
 	{
 		if (retryQueue.size() >= MAX_RETRY_QUEUE)
 		{
-			PendingSubmission dropped = retryQueue.poll();
+			PendingSubmissionStore.PendingItem dropped = retryQueue.poll();
 			if (dropped != null)
 			{
-				log.warn("Bingo retry queue full — dropping oldest queued screenshot for tile {}", dropped.tile.tileId);
+				pendingStore.remove(dropped);
+				log.warn("Bingo retry queue full — dropping oldest queued item {}", dropped.id);
 			}
 		}
-		retryQueue.add(submission);
+		retryQueue.add(item);
 	}
 
 	private void retryPendingSubmissions()
@@ -707,41 +639,50 @@ public class BingoPlugin extends Plugin
 			return;
 		}
 
-		PendingSubmission submission;
-		while ((submission = retryQueue.poll()) != null)
+		PendingSubmissionStore.PendingItem item;
+		while ((item = retryQueue.poll()) != null)
 		{
-			retrySubmission(apiKey, submission);
+			retryProofItem(apiKey, item);
 		}
 	}
 
-	private void retrySubmission(String apiKey, PendingSubmission submission)
+	private void retryProofItem(String apiKey, PendingSubmissionStore.PendingItem item)
 	{
+		byte[] png = pendingStore.readScreenshot(item);
+		if (png == null)
+		{
+			// The screenshot itself is gone (disk issue between sessions) —
+			// nothing left to retry with.
+			pendingStore.remove(item);
+			return;
+		}
+
 		api.submitProof(
 			apiKey,
-			submission.tile.tileId,
-			submission.itemId,
-			submission.png,
-			() -> onSubmitted(submission.itemName, submission.tile.name),
+			item.tileId,
+			item.itemId,
+			png,
+			() -> {
+				pendingStore.remove(item);
+				onSubmitted(item.itemName, item.tileName);
+			},
 			error -> {
 				if ("Could not reach the clan site".equals(error))
 				{
-					enqueueRetry(submission);
+					enqueueRetry(item);
 				}
 				else
 				{
-					notifyPlayer(submission.itemName + " not submitted — " + error);
+					pendingStore.remove(item);
+					notifyPlayer(item.itemName + " not submitted — " + error);
 				}
 			});
 	}
 
-	/**
-	 * Common success path for a real proof landing: chat message, a note to the sidebar panel (so its
-	 * toast can show the same confirmation without needing to be watching chat), plus a refresh.
-	 */
+	/** Common success path for a real proof landing: chat message plus a board refresh. */
 	private void onSubmitted(String itemName, String tileName)
 	{
 		notifyPlayer("Submitted " + itemName + " for tile \"" + tileName + "\"");
-		bingoPanel.notifyAutoSubmitted(itemName);
 		refreshBoard();
 	}
 
@@ -782,13 +723,14 @@ public class BingoPlugin extends Plugin
 	}
 
 	/**
-	 * The clan commands (!verify, !needed, !live, the sync reminder) always
-	 * show their result regardless of the "Chat message on submit" toggle —
-	 * that setting is specifically about drop-submission notifications, not
-	 * a command the player just typed — which is also why they pass their
-	 * own clanMessageColor() here rather than sharing submitMessageColor: a
-	 * bingo drop notification and a clan command reply aren't the same kind
-	 * of message, so one color config shouldn't govern both.
+	 * The clan commands (!rank, !verify, !needed, !live, the sync reminder)
+	 * always show their result regardless of the "Chat message on submit"
+	 * toggle — that setting is specifically about drop-submission
+	 * notifications, not a command the player just typed — which is also
+	 * why they pass their own clanMessageColor() here rather than sharing
+	 * submitMessageColor: a bingo drop notification and a clan command
+	 * reply aren't the same kind of message, so one color config shouldn't
+	 * govern both.
 	 */
 	private void sendChatMessage(String message, Color color)
 	{
@@ -797,7 +739,7 @@ public class BingoPlugin extends Plugin
 	}
 
 	/**
-	 * Handles "!verify [name]" once it's actually been sent (this is
+	 * Handles "!rank [name]" once it's actually been sent (this is
 	 * registerCommandAsync's execute callback, run off the client thread
 	 * already). No name defaults to the sender — chatMessage.getName() is
 	 * this message's own author for a real sent message, so no client-thread
@@ -809,6 +751,27 @@ public class BingoPlugin extends Plugin
 	 */
 	private void onRankCommand(ChatMessage chatMessage, String message)
 	{
+		String rsn = commandArgument(message, RANK_COMMAND, chatMessage);
+		if (rsn.isEmpty())
+		{
+			sendChatMessage("Usage - " + RANK_COMMAND + " [name]", config.clanMessageColor());
+			return;
+		}
+
+		api.lookupRank(rsn,
+			result -> setChatReply(chatMessage, formatRankResult(result)),
+			(error, reason) -> setChatReply(chatMessage, describeRankError(rsn, error, reason)));
+	}
+
+	/**
+	 * Handles "!verify [name]" — same shape as !rank, but a different,
+	 * stricter check: the clan's hard gear/kc gate (see VERIFY_COMMAND's
+	 * doc) rather than the rank-tier ladder. Kept as its own command
+	 * rather than folded into !rank's reply since they answer genuinely
+	 * different questions ("what rank" vs. "do they meet the hard gate").
+	 */
+	private void onVerifyCommand(ChatMessage chatMessage, String message)
+	{
 		String rsn = commandArgument(message, VERIFY_COMMAND, chatMessage);
 		if (rsn.isEmpty())
 		{
@@ -816,8 +779,8 @@ public class BingoPlugin extends Plugin
 			return;
 		}
 
-		api.lookupRank(rsn,
-			result -> setChatReply(chatMessage, formatRankResult(result)),
+		api.checkClanRequirement(rsn,
+			result -> setChatReply(chatMessage, formatClanRequirementResult(result)),
 			(error, reason) -> setChatReply(chatMessage, describeRankError(rsn, error, reason)));
 	}
 
@@ -892,6 +855,14 @@ public class BingoPlugin extends Plugin
 	{
 		String eligible = result.eligibleRank != null ? result.eligibleRank : "no rank yet";
 		return result.rsn + " qualifies for " + eligible + " - " + result.overallSatisfied + "/" + result.overallTotal + " items";
+	}
+
+	private String formatClanRequirementResult(BingoApiClient.ClanRequirementResult result)
+	{
+		return result.meets
+			? result.rsn + " meets the clan requirements - " + result.reason
+			: result.rsn + " does not meet the clan requirements yet (needs 6 Crystal Armour Seeds + an"
+				+ " Enhanced Crystal Weapon Seed, 800+ Corrupted Gauntlet kc, or a Twisted Bow).";
 	}
 
 	private String formatNeededResult(BingoApiClient.RankLookupResult result)
@@ -1052,19 +1023,49 @@ public class BingoPlugin extends Plugin
 			error -> log.debug("Failed to check broadcast: {}", error));
 	}
 
-	private static class PendingSubmission
-	{
-		private final BoardResponse.Tile tile;
-		private final int itemId;
-		private final String itemName;
-		private final byte[] png;
+	private static final String LAST_ANNOUNCED_WOM_COMPETITION_KEY = "lastAnnouncedWomCompetition";
 
-		private PendingSubmission(BoardResponse.Tile tile, int itemId, String itemName, byte[] png)
+	/**
+	 * Backs the "Wise Old Man competitions" toggle: announces once, in chat,
+	 * whenever a new Skill/Boss of the Week competition goes from "not
+	 * running" to "ongoing". The last-announced competition id is persisted
+	 * via ConfigManager, same reasoning as LAST_SEEN_BROADCAST_KEY above — an
+	 * in-memory-only flag would re-announce the same still-running
+	 * competition after every client restart. The very first check after
+	 * enabling this only seeds the stored id silently (same pattern as
+	 * previouslyLiveUsernames in checkLiveStreams) so a competition that's
+	 * already been running for days doesn't get announced as "new" just
+	 * because the plugin only just started watching.
+	 */
+	private void checkWomEvents()
+	{
+		if (!config.notifyWomEvents())
 		{
-			this.tile = tile;
-			this.itemId = itemId;
-			this.itemName = itemName;
-			this.png = png;
+			return;
 		}
+
+		womEventClient.fetchOngoingCompetition(
+			competition -> {
+				String lastAnnounced = configManager.getConfiguration(BingoConfig.GROUP, LAST_ANNOUNCED_WOM_COMPETITION_KEY);
+				if (competition == null)
+				{
+					return;
+				}
+				String id = String.valueOf(competition.id);
+				if (id.equals(lastAnnounced))
+				{
+					return;
+				}
+				configManager.setConfiguration(BingoConfig.GROUP, LAST_ANNOUNCED_WOM_COMPETITION_KEY, id);
+				if (lastAnnounced == null)
+				{
+					// First check ever — seed silently rather than announcing whatever's already running.
+					return;
+				}
+				sendChatMessage(
+					"New Wise Old Man competition: " + competition.title + " (" + competition.metric + ")",
+					config.clanMessageColor());
+			},
+			error -> log.debug("Failed to check Wise Old Man competitions: {}", error));
 	}
 }

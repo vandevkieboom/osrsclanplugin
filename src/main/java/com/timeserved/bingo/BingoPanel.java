@@ -4,6 +4,7 @@ import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Component;
 import java.awt.Container;
+import java.awt.Cursor;
 import java.awt.Dimension;
 import java.awt.Font;
 import java.awt.FontMetrics;
@@ -14,15 +15,17 @@ import java.awt.Insets;
 import java.awt.LayoutManager;
 import java.awt.Rectangle;
 import java.awt.RenderingHints;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.awt.image.BufferedImage;
 import java.io.IOException;
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 import javax.imageio.ImageIO;
 import javax.inject.Inject;
 import javax.swing.BorderFactory;
@@ -53,7 +56,6 @@ public class BingoPanel extends PluginPanel
 	private static final Color GOOD = new Color(55, 240, 70);
 	private static final Color WARN = new Color(230, 150, 30);
 	private static final Color NEUTRAL_SWATCH = ColorScheme.MEDIUM_GRAY_COLOR;
-	private static final long TOAST_WINDOW_MILLIS = TimeUnit.MINUTES.toMillis(2);
 	private static final int LEADERBOARD_ROWS = 5;
 	private static final int TILE_SIZE = 30;
 	private static final int TILE_ICON_PX = 20;
@@ -69,6 +71,9 @@ public class BingoPanel extends PluginPanel
 
 	private final ScheduledExecutorService executor;
 	private final Map<String, ImageIcon> iconCache = new ConcurrentHashMap<>();
+	/** Which collapsible sections are open, keyed by a short section id. Survives refresh()'s full
+	 * teardown-and-rebuild — otherwise every board poll would silently re-expand anything you'd closed. */
+	private final Map<String, Boolean> sectionExpanded = new HashMap<>();
 
 	private final JPanel content = new ScrollableColumn();
 	private final JScrollPane scrollPane;
@@ -76,8 +81,6 @@ public class BingoPanel extends PluginPanel
 	private final Timer statusTimer;
 
 	private volatile long lastSyncedAt;
-	private volatile String lastAutoSubmitItem;
-	private volatile long lastAutoSubmitAt;
 
 	@Inject
 	public BingoPanel(ScheduledExecutorService executor)
@@ -137,6 +140,18 @@ public class BingoPanel extends PluginPanel
 	{
 		int scrollPosition = scrollPane.getVerticalScrollBar().getValue();
 
+		// Hidden for the whole teardown-and-rebuild below, not just the
+		// scroll-position correction: rebuilding every section fresh means
+		// their combined height is briefly whatever partial state they're
+		// in mid-rebuild (e.g. a section not added yet, or the board grid's
+		// real height not yet known — see loadIconInto), which BoxLayout is
+		// free to lay out and paint before this method even returns. A
+		// hidden component is skipped by its parent's paint entirely, so
+		// none of those intermediate layouts are ever actually shown —
+		// setVisible(true) in the deferred callback below is the first
+		// paint anyone sees, and by then the layout is already final.
+		content.setVisible(false);
+
 		lastSyncedAt = System.currentTimeMillis();
 		content.removeAll();
 
@@ -160,13 +175,6 @@ public class BingoPanel extends PluginPanel
 
 		content.add(buildLeaderboardSection(board));
 
-		JPanel toast = buildToast();
-		if (toast != null)
-		{
-			content.add(Box.createVerticalStrut(10));
-			content.add(toast);
-		}
-
 		content.add(Box.createVerticalStrut(6));
 		content.add(buildStatusLine());
 
@@ -180,19 +188,9 @@ public class BingoPanel extends PluginPanel
 		// the scrollbar is already right before anything is drawn at all, so that frame never happens.
 		SwingUtilities.invokeLater(() -> {
 			scrollPane.getVerticalScrollBar().setValue(scrollPosition);
+			content.setVisible(true);
 			content.repaint();
 		});
-	}
-
-	/**
-	 * Call right after the plugin auto-submits a drop, so the sidebar shows the same confirmation the
-	 * chat message does. Doesn't repaint by itself — the caller (BingoPlugin#onSubmitted) always follows
-	 * an auto-submit with a board refresh anyway, which is what actually surfaces the toast.
-	 */
-	public void notifyAutoSubmitted(String itemName)
-	{
-		lastAutoSubmitItem = itemName;
-		lastAutoSubmitAt = System.currentTimeMillis();
 	}
 
 	// ---- header ------------------------------------------------------
@@ -217,11 +215,6 @@ public class BingoPanel extends PluginPanel
 		if (myTeam != null)
 		{
 			Color teamColor = parseColor(myTeam.accentColor, ColorScheme.BRAND_ORANGE);
-			JLabel dot = new JLabel("●");
-			dot.setFont(dot.getFont().deriveFont(8f));
-			dot.setForeground(teamColor);
-			metaRow.add(dot);
-			metaRow.add(Box.createHorizontalStrut(5));
 
 			JLabel teamName = new JLabel(myTeam.name);
 			teamName.setFont(FontManager.getRunescapeSmallFont().deriveFont(Font.BOLD));
@@ -233,10 +226,6 @@ public class BingoPanel extends PluginPanel
 			metaRow.add(smallLabel("No team yet", ColorScheme.LIGHT_GRAY_COLOR));
 		}
 
-		if (board.config != null && board.config.size > 0)
-		{
-			metaRow.add(smallLabel("  ·  " + board.config.size + "×" + board.config.size, ColorScheme.LIGHT_GRAY_COLOR));
-		}
 		metaRow.add(Box.createHorizontalGlue());
 		header.add(metaRow);
 		return header;
@@ -246,70 +235,67 @@ public class BingoPanel extends PluginPanel
 
 	private JPanel buildBoardSection(BoardResponse board, BoardResponse.Team myTeam)
 	{
-		JPanel section = cappedColumn();
-		section.add(sectionHeader("Your Board", myTeam.completeCount + "/" + myTeam.totalTiles));
+		JPanel body = cappedColumn();
 
 		JPanel progressRow = cappedRow();
-		progressRow.add(smallLabel("Team progress", ColorScheme.LIGHT_GRAY_COLOR));
+		progressRow.add(smallLabel("Team progress", Color.WHITE));
 		progressRow.add(Box.createHorizontalGlue());
 		progressRow.add(smallLabel(myTeam.pct + "%", Color.WHITE));
-		section.add(progressRow);
-		section.add(Box.createVerticalStrut(4));
+		body.add(progressRow);
+		body.add(Box.createVerticalStrut(4));
 
 		ProgressBar boardBar = new ProgressBar();
 		boardBar.setAlignmentX(Component.LEFT_ALIGNMENT);
 		boardBar.setProgress(myTeam.totalTiles > 0 ? (double) myTeam.completeCount / myTeam.totalTiles : 0, GOOD);
-		section.add(boardBar);
+		body.add(boardBar);
 
 		List<BoardResponse.Tile> allTiles = myTeam.getTiles();
-		if (allTiles.isEmpty())
+		if (!allTiles.isEmpty())
 		{
-			return section;
-		}
+			// Every tile — item or xp/kc goal — occupies a real board position (see the `position` column
+			// in db/schema.sql), so all of them belong in the grid, not just item tiles. A tile that isn't
+			// on the current team's board response yet (goal or otherwise) just leaves that slot blank.
+			int size = board.config != null && board.config.size > 0
+				? board.config.size
+				: (int) Math.ceil(Math.sqrt(allTiles.size()));
+			int totalSlots = size * size;
 
-		// Every tile — item or xp/kc goal — occupies a real board position (see the `position` column
-		// in db/schema.sql), so all of them belong in the grid, not just item tiles. A tile that isn't
-		// on the current team's board response yet (goal or otherwise) just leaves that slot blank.
-		int size = board.config != null && board.config.size > 0
-			? board.config.size
-			: (int) Math.ceil(Math.sqrt(allTiles.size()));
-		int totalSlots = size * size;
-
-		BoardResponse.Tile[] byPosition = new BoardResponse.Tile[totalSlots];
-		for (BoardResponse.Tile tile : allTiles)
-		{
-			if (tile.position >= 0 && tile.position < totalSlots)
+			BoardResponse.Tile[] byPosition = new BoardResponse.Tile[totalSlots];
+			for (BoardResponse.Tile tile : allTiles)
 			{
-				byPosition[tile.position] = tile;
+				if (tile.position >= 0 && tile.position < totalSlots)
+				{
+					byPosition[tile.position] = tile;
+				}
 			}
-		}
 
-		section.add(Box.createVerticalStrut(8));
-		// A plain GridLayout can't do "stretch to fill the full width, but derive height so cells stay
-		// square" — it either stretches both dimensions (rectangles, the original bug) or neither
-		// (a small fixed block that wastes the rest of the sidebar, what happened after capping both).
-		// SquareTileGrid computes cell size from its actual assigned width at layout time instead.
-		SquareTileGrid grid = new SquareTileGrid(size, 3);
-		for (BoardResponse.Tile tile : byPosition)
-		{
-			if (tile == null)
+			body.add(Box.createVerticalStrut(8));
+			// A plain GridLayout can't do "stretch to fill the full width, but derive height so cells stay
+			// square" — it either stretches both dimensions (rectangles, the original bug) or neither
+			// (a small fixed block that wastes the rest of the sidebar, what happened after capping both).
+			// SquareTileGrid computes cell size from its actual assigned width at layout time instead.
+			SquareTileGrid grid = new SquareTileGrid(size, 3, content);
+			for (BoardResponse.Tile tile : byPosition)
 			{
-				grid.add(blankSlot());
-				continue;
+				if (tile == null)
+				{
+					grid.add(blankSlot());
+					continue;
+				}
+				// Item tiles have approved/pending/rejected/none; goal tiles are only ever approved (target
+				// reached) or none (see api/board.ts) — both map onto the same two/three visual states fine.
+				TileCell.State state = "approved".equals(tile.status) ? TileCell.State.DONE
+					: "pending".equals(tile.status) ? TileCell.State.PENDING
+					: TileCell.State.EMPTY;
+				TileCell cell = new TileCell(state);
+				cell.setToolTipText(tile.name);
+				loadIconInto(cell, tile.iconUrl);
+				grid.add(cell);
 			}
-			// Item tiles have approved/pending/rejected/none; goal tiles are only ever approved (target
-			// reached) or none (see api/board.ts) — both map onto the same two/three visual states fine.
-			TileCell.State state = "approved".equals(tile.status) ? TileCell.State.DONE
-				: "pending".equals(tile.status) ? TileCell.State.PENDING
-				: TileCell.State.EMPTY;
-			TileCell cell = new TileCell(state);
-			cell.setToolTipText(tile.name);
-			loadIconInto(cell, tile.iconUrl);
-			grid.add(cell);
+			body.add(grid);
 		}
-		section.add(grid);
 
-		return section;
+		return collapsibleSection("board", "Your Board", myTeam.completeCount + "/" + myTeam.totalTiles, body);
 	}
 
 	/** An unconfigured board position — no tile at all, not just an incomplete one. */
@@ -374,8 +360,7 @@ public class BingoPanel extends PluginPanel
 			return null;
 		}
 
-		JPanel section = cappedColumn();
-		section.add(sectionHeader("Team Goals", null));
+		JPanel body = cappedColumn();
 		for (int i = 0; i < goalTiles.size(); i++)
 		{
 			BoardResponse.Tile tile = goalTiles.get(i);
@@ -384,14 +369,14 @@ public class BingoPanel extends PluginPanel
 			double fraction = (double) progress / target;
 			Color color = progress >= target ? GOOD : WARN;
 			String suffix = tile.isXpGoal() ? " XP" : " KC";
-			section.add(goalRow(capitalize(tile.goalKey) + suffix,
+			body.add(goalRow(capitalize(tile.goalKey) + suffix,
 				formatNumber(progress) + " / " + formatNumber(target), fraction, color));
 			if (i < goalTiles.size() - 1)
 			{
-				section.add(Box.createVerticalStrut(8));
+				body.add(Box.createVerticalStrut(8));
 			}
 		}
-		return section;
+		return collapsibleSection("goals", "Team Goals", null, body);
 	}
 
 	private JPanel goalRow(String name, String value, double fraction, Color color)
@@ -399,11 +384,10 @@ public class BingoPanel extends PluginPanel
 		JPanel row = cappedColumn();
 
 		JPanel labelRow = cappedRow();
-		JLabel nameLabel = smallLabel(name, ColorScheme.TEXT_COLOR);
-		nameLabel.setFont(nameLabel.getFont().deriveFont(Font.BOLD));
+		JLabel nameLabel = smallLabel(name, Color.WHITE);
 		labelRow.add(nameLabel);
 		labelRow.add(Box.createHorizontalGlue());
-		labelRow.add(smallLabel(value, ColorScheme.LIGHT_GRAY_COLOR));
+		labelRow.add(smallLabel(value, Color.WHITE));
 		row.add(labelRow);
 		row.add(Box.createVerticalStrut(3));
 
@@ -424,13 +408,12 @@ public class BingoPanel extends PluginPanel
 			? Integer.compare(b.pct, a.pct)
 			: a.name.compareToIgnoreCase(b.name));
 
-		JPanel section = cappedColumn();
-		section.add(sectionHeader("Clan Standings", null));
+		JPanel body = cappedColumn();
 
 		if (teams.isEmpty())
 		{
-			section.add(smallLabel("No teams yet.", ColorScheme.LIGHT_GRAY_COLOR));
-			return section;
+			body.add(smallLabel("No teams yet.", ColorScheme.LIGHT_GRAY_COLOR));
+			return collapsibleSection("standings", "Clan Standings", null, body);
 		}
 
 		List<BoardResponse.Team> shown = teams.size() <= LEADERBOARD_ROWS
@@ -441,10 +424,10 @@ public class BingoPanel extends PluginPanel
 		{
 			BoardResponse.Team team = shown.get(i);
 			boolean mine = team.id.equals(board.myTeamId);
-			section.add(leaderboardRow(i + 1, team, mine));
+			body.add(leaderboardRow(i + 1, team, mine));
 			if (i < shown.size() - 1)
 			{
-				section.add(Box.createVerticalStrut(6));
+				body.add(Box.createVerticalStrut(6));
 			}
 		}
 
@@ -457,62 +440,62 @@ public class BingoPanel extends PluginPanel
 			{
 				if (teams.get(i).id.equals(board.myTeamId))
 				{
-					section.add(Box.createVerticalStrut(10));
-					section.add(leaderboardRow(i + 1, teams.get(i), true));
+					body.add(Box.createVerticalStrut(10));
+					body.add(leaderboardRow(i + 1, teams.get(i), true));
 					break;
 				}
 			}
 		}
 
-		return section;
+		return collapsibleSection("standings", "Clan Standings", null, body);
 	}
 
 	private JPanel leaderboardRow(int rank, BoardResponse.Team team, boolean mine)
 	{
-		JPanel row = capped(new BorderLayout(7, 0));
+		JPanel row = roundedRow(new BorderLayout(7, 0));
+		row.setBorder(new EmptyBorder(3, 4, 3, 4));
+		Color teamColor = parseColor(team.accentColor, NEUTRAL_SWATCH);
+		Color barColor = mine ? teamColor : NEUTRAL_SWATCH;
 		if (mine)
 		{
+			// A plain gray hover color didn't read as "your team" clearly enough — a translucent tint of
+			// the team's own accent color stands out regardless of what that color actually is.
 			row.setOpaque(true);
-			row.setBackground(ColorScheme.DARK_GRAY_HOVER_COLOR);
-			row.setBorder(new EmptyBorder(3, 4, 3, 4));
+			row.setBackground(new Color(
+				teamColor.getRed(),
+				teamColor.getGreen(),
+				teamColor.getBlue(),
+				50));
 		}
 
 		JLabel rankLabel = new JLabel(String.valueOf(rank));
 		rankLabel.setFont(FontManager.getRunescapeSmallFont().deriveFont(Font.BOLD));
-		rankLabel.setForeground(ColorScheme.MEDIUM_GRAY_COLOR);
+		rankLabel.setForeground(Color.WHITE);
 		rankLabel.setPreferredSize(new Dimension(16, rankLabel.getPreferredSize().height));
 		row.add(rankLabel, BorderLayout.WEST);
 
 		JPanel middle = cappedColumn();
 		middle.setOpaque(false);
 
-		Color teamColor = parseColor(team.accentColor, NEUTRAL_SWATCH);
-
 		JPanel nameRow = cappedRow();
 		nameRow.setOpaque(false);
-		JLabel swatch = new JLabel("■");
-		swatch.setFont(swatch.getFont().deriveFont(8f));
-		swatch.setForeground(teamColor);
-		nameRow.add(swatch);
-		nameRow.add(Box.createHorizontalStrut(5));
 		JLabel nameLabel = new JLabel(team.name);
-		nameLabel.setFont(FontManager.getRunescapeSmallFont().deriveFont(mine ? Font.BOLD : Font.PLAIN));
-		nameLabel.setForeground(mine ? Color.WHITE : ColorScheme.TEXT_COLOR);
+		nameLabel.setFont(FontManager.getRunescapeSmallFont());
+		nameLabel.setForeground(mine ? teamColor : Color.WHITE);
 		nameRow.add(nameLabel);
 		middle.add(nameRow);
-		middle.add(Box.createVerticalStrut(3));
+		middle.add(Box.createVerticalStrut(4));
 
 		ProgressBar bar = new ProgressBar();
 		bar.setAlignmentX(Component.LEFT_ALIGNMENT);
-		bar.setPreferredSize(new Dimension(10, 4));
-		bar.setProgress(team.pct / 100.0, mine ? ColorScheme.BRAND_ORANGE : ColorScheme.MEDIUM_GRAY_COLOR);
+		bar.setProgress(team.pct / 100.0, barColor);
 		middle.add(bar);
 
 		row.add(middle, BorderLayout.CENTER);
 
 		JLabel pctLabel = new JLabel(team.pct + "%");
 		pctLabel.setFont(FontManager.getRunescapeSmallFont());
-		pctLabel.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
+		pctLabel.setForeground(Color.WHITE);
 		pctLabel.setHorizontalAlignment(SwingConstants.RIGHT);
 		pctLabel.setPreferredSize(new Dimension(32, pctLabel.getPreferredSize().height));
 		row.add(pctLabel, BorderLayout.EAST);
@@ -520,37 +503,7 @@ public class BingoPanel extends PluginPanel
 		return row;
 	}
 
-	// ---- toast + status --------------------------------------------------
-
-	/** Null when nothing was auto-submitted recently — the caller just omits the row entirely. */
-	private JPanel buildToast()
-	{
-		String item = lastAutoSubmitItem;
-		long at = lastAutoSubmitAt;
-		if (item == null || System.currentTimeMillis() - at > TOAST_WINDOW_MILLIS)
-		{
-			return null;
-		}
-
-		JPanel toast = capped(new BorderLayout(6, 0));
-		toast.setOpaque(true);
-		toast.setBackground(ColorScheme.DARKER_GRAY_COLOR);
-		toast.setBorder(BorderFactory.createCompoundBorder(
-			BorderFactory.createMatteBorder(0, 2, 0, 0, GOOD),
-			new EmptyBorder(6, 6, 6, 6)));
-
-		JLabel icon = new JLabel("⚒");
-		icon.setFont(icon.getFont().deriveFont(13f));
-		toast.add(icon, BorderLayout.WEST);
-
-		JLabel text = new JLabel("<html>" + escapeHtml(item) + " auto-detected — submitted</html>");
-		text.setFont(FontManager.getRunescapeSmallFont());
-		text.setForeground(ColorScheme.LIGHT_GRAY_COLOR);
-		text.setBorder(new EmptyBorder(0, 6, 0, 0));
-		toast.add(text, BorderLayout.CENTER);
-
-		return toast;
-	}
+	// ---- status --------------------------------------------------
 
 	private JPanel buildStatusLine()
 	{
@@ -564,7 +517,7 @@ public class BingoPanel extends PluginPanel
 		row.add(dot, BorderLayout.WEST);
 
 		statusLabel.setFont(FontManager.getRunescapeSmallFont());
-		statusLabel.setForeground(ColorScheme.MEDIUM_GRAY_COLOR);
+		statusLabel.setForeground(Color.WHITE);
 		statusLabel.setBorder(new EmptyBorder(6, 6, 0, 0));
 		updateStatusLabelText();
 		row.add(statusLabel, BorderLayout.CENTER);
@@ -598,32 +551,83 @@ public class BingoPanel extends PluginPanel
 
 	// ---- shared helpers --------------------------------------------------
 
-	private JPanel sectionHeader(String text, String count)
+	/**
+	 * A section with a clickable, arrow-prefixed header that expands/collapses {@code body} — an
+	 * accordion, so a long board doesn't force scrolling past sections you already know the state of.
+	 * Expand/collapse state is kept in {@link #sectionExpanded} by {@code key}, not on the component
+	 * itself, since refresh() tears down and rebuilds every section fresh on every poll; without that,
+	 * anything you'd collapsed would silently pop back open on the next refresh.
+	 *
+	 * <p>The whole header row toggles on click, not just the arrow glyph — Swing delivers a mouse event
+	 * to whichever child component is directly under the cursor, so the same listener has to be attached
+	 * to the row itself AND every label inside it, or clicking directly on the title text would do nothing.
+	 */
+	private JPanel collapsibleSection(String key, String title, String count, JPanel body)
 	{
-		JLabel title = new JLabel(text.toUpperCase());
-		title.setFont(FontManager.getRunescapeSmallFont().deriveFont(Font.BOLD));
-		title.setForeground(ColorScheme.BRAND_ORANGE);
+		boolean expanded = sectionExpanded.getOrDefault(key, true);
+		body.setVisible(expanded);
 
-		JPanel row = new JPanel(new BorderLayout());
-		row.setOpaque(false);
-		row.setAlignmentX(Component.LEFT_ALIGNMENT);
-		row.setBorder(BorderFactory.createCompoundBorder(
+		JLabel arrow = smallLabel(expanded ? "▾" : "▸", ColorScheme.BRAND_ORANGE);
+
+		JLabel titleLabel = new JLabel(title.toUpperCase());
+		titleLabel.setFont(FontManager.getRunescapeSmallFont().deriveFont(Font.BOLD));
+		titleLabel.setForeground(ColorScheme.BRAND_ORANGE);
+
+		JPanel titleRow = cappedRow();
+		titleRow.setOpaque(false);
+		titleRow.add(arrow);
+		titleRow.add(Box.createHorizontalStrut(5));
+		titleRow.add(titleLabel);
+
+		JPanel headerRow = new JPanel(new BorderLayout());
+		headerRow.setOpaque(false);
+		headerRow.setAlignmentX(Component.LEFT_ALIGNMENT);
+		headerRow.setBorder(BorderFactory.createCompoundBorder(
 			BorderFactory.createMatteBorder(0, 0, 1, 0, ColorScheme.MEDIUM_GRAY_COLOR),
 			new EmptyBorder(0, 0, 5, 0)));
-		row.add(title, BorderLayout.WEST);
+		headerRow.add(titleRow, BorderLayout.WEST);
 
+		JLabel countLabel = null;
 		if (count != null)
 		{
-			JLabel countLabel = new JLabel(count);
+			countLabel = new JLabel(count);
 			countLabel.setFont(FontManager.getRunescapeSmallFont());
-			countLabel.setForeground(ColorScheme.MEDIUM_GRAY_COLOR);
-			row.add(countLabel, BorderLayout.EAST);
+			countLabel.setForeground(Color.WHITE);
+			headerRow.add(countLabel, BorderLayout.EAST);
 		}
 
-		JPanel wrap = capped(new BorderLayout());
-		wrap.add(row, BorderLayout.CENTER);
-		wrap.setBorder(new EmptyBorder(0, 0, 8, 0));
-		return wrap;
+		JPanel headerWrap = capped(new BorderLayout());
+		headerWrap.add(headerRow, BorderLayout.CENTER);
+		headerWrap.setBorder(new EmptyBorder(0, 0, 8, 0));
+		headerWrap.setName("collapsible-header-" + key);
+
+		MouseAdapter toggle = new MouseAdapter()
+		{
+			@Override
+			public void mouseClicked(MouseEvent e)
+			{
+				boolean nowExpanded = !body.isVisible();
+				body.setVisible(nowExpanded);
+				sectionExpanded.put(key, nowExpanded);
+				arrow.setText(nowExpanded ? "▾" : "▸");
+				content.revalidate();
+				content.repaint();
+			}
+		};
+		for (Component c : new Component[]{headerWrap, headerRow, titleRow, arrow, titleLabel, countLabel})
+		{
+			if (c == null)
+			{
+				continue;
+			}
+			c.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+			c.addMouseListener(toggle);
+		}
+
+		JPanel section = cappedColumn();
+		section.add(headerWrap);
+		section.add(body);
+		return section;
 	}
 
 	private JLabel smallLabel(String text, Color color)
@@ -683,11 +687,6 @@ public class BingoPanel extends PluginPanel
 		return String.valueOf(value);
 	}
 
-	private static String escapeHtml(String text)
-	{
-		return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
-	}
-
 	/**
 	 * A height-capped, left-aligned container so a BoxLayout parent can't stretch it — for layouts that
 	 * don't care which container they're attached to (BorderLayout, GridLayout). BoxLayout itself can't
@@ -703,6 +702,41 @@ public class BingoPanel extends PluginPanel
 			public Dimension getMaximumSize()
 			{
 				return new Dimension(Integer.MAX_VALUE, getPreferredSize().height);
+			}
+		};
+		panel.setOpaque(false);
+		panel.setAlignmentX(Component.LEFT_ALIGNMENT);
+		return panel;
+	}
+
+	private static final int ROUNDED_ROW_RADIUS = 8;
+
+	/**
+	 * Same height-capped behavior as {@link #capped}, but paints its own background (when
+	 * {@code setOpaque(true)} + {@code setBackground(...)} are used, as the leaderboard's "your team" row
+	 * does) as a rounded rect instead of Swing's default hard-cornered opaque fill.
+	 */
+	private static JPanel roundedRow(LayoutManager layout)
+	{
+		JPanel panel = new JPanel(layout)
+		{
+			@Override
+			public Dimension getMaximumSize()
+			{
+				return new Dimension(Integer.MAX_VALUE, getPreferredSize().height);
+			}
+
+			@Override
+			protected void paintComponent(Graphics g)
+			{
+				if (isOpaque())
+				{
+					Graphics2D g2 = (Graphics2D) g.create();
+					g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+					g2.setColor(getBackground());
+					g2.fillRoundRect(0, 0, getWidth(), getHeight(), ROUNDED_ROW_RADIUS, ROUNDED_ROW_RADIUS);
+					g2.dispose();
+				}
 			}
 		};
 		panel.setOpaque(false);
@@ -735,7 +769,7 @@ public class BingoPanel extends PluginPanel
 		ProgressBar()
 		{
 			setOpaque(false);
-			setPreferredSize(new Dimension(10, 6));
+			setPreferredSize(new Dimension(10, 7));
 		}
 
 		void setProgress(double fraction, Color fillColor)
@@ -767,36 +801,48 @@ public class BingoPanel extends PluginPanel
 				g2.setColor(fillColor);
 				g2.fillRoundRect(0, 0, Math.max(fillW, h), h, h, h);
 			}
+			g2.setColor(Color.BLACK);
+			g2.drawRoundRect(0, 0, w - 1, h - 1, h, h);
 			g2.dispose();
 		}
 	}
 
 	/**
-	 * A grid of square cells that fills whatever width the parent container actually has, deriving cell
-	 * (and therefore overall) height from that width — the Swing equivalent of CSS's
+	 * A grid of square cells that fills whatever width the sidebar actually has, deriving cell (and
+	 * therefore overall) height from that width — the Swing equivalent of CSS's
 	 * {@code aspect-ratio: 1} on a {@code repeat(N, 1fr)} grid.
 	 *
-	 * <p>Two earlier versions of this got the width wrong in opposite directions: one measured its OWN
-	 * getWidth() during layout and tried to self-correct via revalidate() once known, but the parent
-	 * never ended up reserving the corrected height, so rows got positioned beyond this component's own
-	 * bounds and Swing clipped them. The other computed a width from RuneLite's documented sidebar
-	 * constants up front, which was close but assumed a scrollbar width that didn't match what this
-	 * JScrollPane's actual scrollbar renders at, leaving an unfilled gap.
+	 * <p>Three earlier versions of this got the width wrong. One measured its OWN getWidth() during
+	 * layout and tried to self-correct via revalidate() once known, but the parent never ended up
+	 * reserving the corrected height, so rows got positioned beyond this component's own bounds and
+	 * Swing clipped them. Another computed a width from RuneLite's documented sidebar constants up
+	 * front, which was close but assumed a scrollbar width that didn't match what this JScrollPane's
+	 * actual scrollbar renders at, leaving an unfilled gap. A third read {@link #getParent()}'s width
+	 * instead of this component's own — correct in principle (a container can't be asked to arrange its
+	 * children until it already has real bounds itself), but it silently assumed the grid's immediate
+	 * parent WAS the one reliably-already-sized ancestor. That broke the moment a collapsible-section
+	 * wrapper got inserted between them: the grid's very first preferred-size query (before its new,
+	 * deeper parent had a valid width yet) got cached into the ancestor chain's reserved height by
+	 * BoxLayout, while doLayout() below went on to correctly compute a bigger cellSize once the parent
+	 * DID have a real width — same clipped-bottom-row bug as the very first version, just introduced by
+	 * a refactor nobody expected to affect this.
 	 *
-	 * <p>The fix: read {@link #getParent()}'s width instead of this component's own. A container can't be
-	 * asked to arrange its children until it already has real bounds itself — that's a hard invariant of
-	 * how Swing layout works — so by the time anything queries a child's preferred size, the parent's
-	 * width is always already valid. No guessing, no placeholder-then-correct cycle needed.
+	 * <p>The actual fix: don't guess which ancestor is reliable — take an explicit reference to one that
+	 * always is. {@code widthReference} is {@link BingoPanel#content}, the scroll view itself, which the
+	 * JScrollPane machinery keeps sized to the real sidebar width no matter how many wrapper panels this
+	 * class ends up nested under in the future.
 	 */
 	private static final class SquareTileGrid extends JPanel
 	{
 		private final int columns;
 		private final int gap;
+		private final Component widthReference;
 
-		SquareTileGrid(int columns, int gap)
+		SquareTileGrid(int columns, int gap, Component widthReference)
 		{
 			this.columns = columns;
 			this.gap = gap;
+			this.widthReference = widthReference;
 			setOpaque(false);
 			setAlignmentX(Component.LEFT_ALIGNMENT);
 			setLayout(null);
@@ -807,15 +853,16 @@ public class BingoPanel extends PluginPanel
 			return (int) Math.ceil(getComponentCount() / (double) columns);
 		}
 
-		/** The parent's real interior width (its own width minus its border's insets), or a fallback if
-		 * the parent isn't realized yet (shouldn't normally happen — see the class doc). */
+		/** {@link #widthReference}'s real interior width, or a fallback if it isn't realized yet
+		 * (shouldn't normally happen — see the class doc). */
 		private int availableWidth()
 		{
-			Container parent = getParent();
-			if (parent != null && parent.getWidth() > 0)
+			if (widthReference.getWidth() > 0)
 			{
-				Insets insets = parent.getInsets();
-				return parent.getWidth() - insets.left - insets.right;
+				Insets insets = widthReference instanceof Container
+					? ((Container) widthReference).getInsets()
+					: new Insets(0, 0, 0, 0);
+				return widthReference.getWidth() - insets.left - insets.right;
 			}
 			return CONTENT_WIDTH;
 		}
@@ -893,10 +940,17 @@ public class BingoPanel extends PluginPanel
 			}
 		}
 
+		/**
+		 * Overrides {@code paint}, not {@code paintComponent} — {@code paintComponent} runs BEFORE Swing
+		 * paints this panel's children (the icon label), so drawing the badge there put it underneath the
+		 * item icon whenever the two overlapped in the corner. {@code paint} runs the whole
+		 * background+children+border sequence via {@code super.paint}, then this draws the badge on top of
+		 * all of it, so it's never covered by the icon.
+		 */
 		@Override
-		protected void paintComponent(Graphics g)
+		public void paint(Graphics g)
 		{
-			super.paintComponent(g);
+			super.paint(g);
 			if (state == State.EMPTY)
 			{
 				return;
