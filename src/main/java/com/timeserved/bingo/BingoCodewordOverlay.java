@@ -15,7 +15,7 @@ import net.runelite.client.ui.overlay.components.LineComponent;
  * Old Man's own overlay ({@code net.wiseoldman.ui.CodeWordOverlay} in
  * {@code wise-old-man/wiseoldman-runelite-plugin}) rather than reimplemented from screenshots.
  * It's a single RuneLite {@link LineComponent} (codeword on the left, timestamp on the right)
- * inside a resizable {@link OverlayPanel} — no custom paint code. The "sticky to the right",
+ * inside a resizable {@link OverlayPanel} - no custom paint code. The "sticky to the right",
  * "one line when wide, wraps into extra lines when narrow" behaviour isn't something either
  * plugin builds itself: it's {@link LineComponent}'s own built-in wrapping (once the codeword +
  * timestamp no longer both fit on the panel's current dragged width, it word-wraps the right side
@@ -23,7 +23,7 @@ import net.runelite.client.ui.overlay.components.LineComponent;
  * line(s)), and {@link OverlayPanel} already supplies the resize handles, background panel, and
  * border for free.
  *
- * <p>This is the only codeword overlay — there used to be a second one
+ * <p>This is the only codeword overlay - there used to be a second one
  * ({@code BingoVerificationOverlay}) that only rendered for the single frame a proof screenshot
  * captured, so the codeword wouldn't sit on screen the whole session. That's been removed: if this
  * overlay happens to be on when a proof screenshot is captured, {@code drawManager} picks it up

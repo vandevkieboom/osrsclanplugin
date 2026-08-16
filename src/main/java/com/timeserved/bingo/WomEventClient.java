@@ -17,7 +17,7 @@ import okhttp3.Response;
 import okhttp3.ResponseBody;
 
 /**
- * Talks to Wise Old Man's own public API directly — deliberately kept separate from
+ * Talks to Wise Old Man's own public API directly - deliberately kept separate from
  * {@link BingoApiClient}, whose class doc scopes it to "the Time Served clan site". Backs the
  * "Wise Old Man competitions" chat announcement only; no plugin key involved, since this never
  * touches the clan site at all.
@@ -29,7 +29,7 @@ class WomEventClient
 	private static final String WOM_BASE_URL = "https://api.wiseoldman.net/v2";
 
 	/**
-	 * Same clan group id the site hardcodes (see clanrankings' WOM_GROUP_ID in src/constants.ts) —
+	 * Same clan group id the site hardcodes (see clanrankings' WOM_GROUP_ID in src/constants.ts) -
 	 * consistent with this plugin already being hardcoded to a single clan rather than
 	 * configurable per-install.
 	 */
@@ -56,7 +56,7 @@ class WomEventClient
 	}
 
 	/**
-	 * The competition currently running right now (startsAt <= now <= endsAt), or null if none is —
+	 * The competition currently running right now (startsAt <= now <= endsAt), or null if none is -
 	 * deliberately doesn't fall back to "upcoming" the way the site's own event-hiscores tab does,
 	 * since an announcement should mean "this just started," not "one's coming up."
 	 */

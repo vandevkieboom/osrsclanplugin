@@ -19,7 +19,7 @@ import net.runelite.client.RuneLite;
 
 /**
  * Persists bingo drop proof submissions that failed to send to disk, so a
- * client restart doesn't silently lose them — the previous in-memory-only
+ * client restart doesn't silently lose them - the previous in-memory-only
  * retry queue was wiped on every restart, which means losing the only
  * evidence of something that actually happened in game, with no way to
  * reconstruct it afterwards.
@@ -167,7 +167,7 @@ public class PendingSubmissionStore
 		}
 	}
 
-	/** Deletes a persisted item (and its screenshot, if it has one) — call once it's been submitted successfully, or given up on. */
+	/** Deletes a persisted item (and its screenshot, if it has one) - call once it's been submitted successfully, or given up on. */
 	public void remove(PendingItem item)
 	{
 		if (item.screenshotFile != null)

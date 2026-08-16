@@ -109,12 +109,12 @@ public class BingoPlugin extends Plugin
 	private NavigationButton bingoNavButton;
 
 	/**
-	 * Runs the site's "Auto-Verify" rank check for the given name — what
+	 * Runs the site's "Auto-Verify" rank check for the given name - what
 	 * this plugin's "!verify" command used to be before it was split in
 	 * two (see VERIFY_COMMAND below): "!rank" now reports which rank tier
 	 * someone is eligible for, while "!verify" checks the separate,
 	 * harder clan-gear requirement. "!rank <name>" really is sent as a
-	 * normal chat message, same as "!lvl" or "!kc" — visible to everyone
+	 * normal chat message, same as "!lvl" or "!kc" - visible to everyone
 	 * nearby, plugin or not. The looked-up result then overwrites that
 	 * message's displayed text (see setChatReply below), the exact
 	 * technique RuneLite's own bundled chat commands use, which only ever
@@ -126,19 +126,19 @@ public class BingoPlugin extends Plugin
 	private static final String RANK_COMMAND = "!rank";
 
 	/**
-	 * Checks whether a member meets the clan's hard gear/kc requirement —
+	 * Checks whether a member meets the clan's hard gear/kc requirement -
 	 * the same three-way check ("Auto-Verify" used to just mean rank
 	 * eligibility; this is a separate, stricter gate) the site itself runs
 	 * on its Clan Rankings page: 6+ Crystal Armour Seeds plus an Enhanced
 	 * Crystal Weapon Seed, OR 800+ Corrupted Gauntlet kc, OR a Twisted
-	 * Bow. Same visible-reply mechanism as !rank — see setChatReply.
+	 * Bow. Same visible-reply mechanism as !rank - see setChatReply.
 	 */
 	private static final String VERIFY_COMMAND = "!verify";
 
-	/** Same visible-reply mechanism as !rank — see setChatReply. */
+	/** Same visible-reply mechanism as !rank - see setChatReply. */
 	private static final String NEEDED_COMMAND = "!needed";
 
-	/** Same visible-reply mechanism as !rank — see setChatReply. */
+	/** Same visible-reply mechanism as !rank - see setChatReply. */
 	private static final String LIVE_COMMAND = "!live";
 
 	/** Guards registerCommands()/unregisterCommands() so either is safe to call more than once in a row. */
@@ -160,7 +160,7 @@ public class BingoPlugin extends Plugin
 	 * Whether the site last reported an active bingo event. Kept current by
 	 * checkBingoStatus, a separate, deliberately tiny/cheap/cached request
 	 * (see BingoApiClient#fetchBingoStatus) that runs every scheduled tick
-	 * regardless of this value — unlike the actual board fetch, which is
+	 * regardless of this value - unlike the actual board fetch, which is
 	 * expensive (tiles/teams/submissions) and only ever runs while this is
 	 * true. Defaults true so the plugin behaves normally until it's actually
 	 * heard otherwise, rather than starting paused on a fresh session.
@@ -176,7 +176,7 @@ public class BingoPlugin extends Plugin
 
 	/**
 	 * Drop proofs that failed to send over the network, waiting to retry.
-	 * Backed by PendingSubmissionStore, which mirrors every entry to disk —
+	 * Backed by PendingSubmissionStore, which mirrors every entry to disk -
 	 * startUp() reloads whatever survived a previous session, so a client
 	 * restart mid-outage no longer silently loses a real drop with no way
 	 * to reconstruct it afterwards.
@@ -186,7 +186,7 @@ public class BingoPlugin extends Plugin
 	/**
 	 * Caps how many failed items this plugin holds in memory (and thus on
 	 * disk) at once. Generous rather than tight, now that a restart can't
-	 * wipe the queue — this just bounds a genuinely prolonged, unresolved
+	 * wipe the queue - this just bounds a genuinely prolonged, unresolved
 	 * outage rather than protecting against a restart the way it used to.
 	 */
 	private static final int MAX_RETRY_QUEUE = 100;
@@ -206,13 +206,13 @@ public class BingoPlugin extends Plugin
 	 * until the next board refresh.
 	 */
 	private final Map<String, Long> recentAttempts = new ConcurrentHashMap<>();
-	// 2 game ticks (a tick is 600ms) — comfortably longer than the gap between
+	// 2 game ticks (a tick is 600ms) - comfortably longer than the gap between
 	// NpcLootReceived and LootReceived firing for the SAME kill (they land in
 	// the same tick, or very close), but short enough that genuinely separate
 	// kills seconds apart are never mistaken for duplicates. This used to be
 	// 30 seconds, which was a real bug: rapid-killing a fast-dying, fast-
 	// respawning monster (e.g. farming bones from something weak) meant only
-	// the FIRST kill in any 30-second span ever got submitted — every other
+	// the FIRST kill in any 30-second span ever got submitted - every other
 	// real, separate kill in that window was silently dropped, since this
 	// cache is keyed on tile id alone with no idea whether a later hit is a
 	// genuine new kill or the same kill's duplicate event.
@@ -228,7 +228,7 @@ public class BingoPlugin extends Plugin
 		}
 		if (now - last > DEDUPE_WINDOW_MILLIS)
 		{
-			// Stale — treat as a fresh attempt and reset the window.
+			// Stale - treat as a fresh attempt and reset the window.
 			recentAttempts.put(tileId, now);
 			return false;
 		}
@@ -316,7 +316,7 @@ public class BingoPlugin extends Plugin
 		bingoActive = true;
 	}
 
-	/** Idempotent — safe to call when the commands are already registered (guarded by commandsRegistered). */
+	/** Idempotent - safe to call when the commands are already registered (guarded by commandsRegistered). */
 	private void registerCommands()
 	{
 		if (commandsRegistered)
@@ -330,7 +330,7 @@ public class BingoPlugin extends Plugin
 		commandsRegistered = true;
 	}
 
-	/** Idempotent — safe to call when the commands aren't currently registered. */
+	/** Idempotent - safe to call when the commands aren't currently registered. */
 	private void unregisterCommands()
 	{
 		if (!commandsRegistered)
@@ -349,7 +349,7 @@ public class BingoPlugin extends Plugin
 	{
 		if (event.getGameState() == GameState.LOGGED_IN)
 		{
-			// Fires on every area/instance load, not just a literal login —
+			// Fires on every area/instance load, not just a literal login -
 			// during something like raids or minigames this can happen many
 			// times in quick succession, so the expensive board fetch only
 			// runs here if bingo is actually active; checkBingoStatus's next
@@ -400,17 +400,17 @@ public class BingoPlugin extends Plugin
 	}
 
 	/**
-	 * Runs every minute for every plugin user, forever — this is a general
+	 * Runs every minute for every plugin user, forever - this is a general
 	 * clan tool (chat commands, live-stream/broadcast notifications), not a
 	 * bingo-only one, so most installs run this whether or not a bingo event
 	 * even exists. checkBingoStatus is a deliberately tiny, cached, near-free
 	 * request (see BingoApiClient#fetchBingoStatus) that's cheap enough to
-	 * run every tick regardless — the actual expensive work (refreshBoard,
+	 * run every tick regardless - the actual expensive work (refreshBoard,
 	 * which queries tiles/teams/submissions) only happens on ticks where
 	 * that check says a bingo event is genuinely active, so there's nothing
 	 * bingo-related running at all beyond one tiny cached ping while no
 	 * event is on. checkLiveStreams/checkBroadcast stay on this same
-	 * 1-minute cadence unconditionally — going live or an admin broadcast
+	 * 1-minute cadence unconditionally - going live or an admin broadcast
 	 * are both things worth surfacing promptly.
 	 */
 	@Schedule(period = 1, unit = ChronoUnit.MINUTES, asynchronous = true)
@@ -424,7 +424,7 @@ public class BingoPlugin extends Plugin
 
 	/**
 	 * The only thing that runs every tick regardless of whether bingo is
-	 * active — see fetchBingoStatus's doc for why this is safe to do at
+	 * active - see fetchBingoStatus's doc for why this is safe to do at
 	 * this frequency. Triggers the real (expensive) refreshBoard only once
 	 * this comes back true; otherwise nothing bingo-related happens this
 	 * tick at all.
@@ -446,12 +446,12 @@ public class BingoPlugin extends Plugin
 	/**
 	 * Fetches the board and rebuilds the item-id lookup that handleLoot()
 	 * checks drops against. Team-combined xp/kc tiles need no plugin-side
-	 * reporting at all — their progress comes entirely from the website's
+	 * reporting at all - their progress comes entirely from the website's
 	 * own hiscores polling (see osrsclan/api/_lib/board.ts), so this only
 	 * ever has to watch for item drops.
 	 *
 	 * <p>Called directly (bypassing checkBingoStatus's gate) from
-	 * startUp/onGameStateChanged/onConfigChanged/onSubmitted — a login, a
+	 * startUp/onGameStateChanged/onConfigChanged/onSubmitted - a login, a
 	 * key change, or a real submission always gets an immediate, real check
 	 * rather than waiting on the next scheduled tick.
 	 */
@@ -501,7 +501,7 @@ public class BingoPlugin extends Plugin
 	}
 
 	/**
-	 * Covers loot that doesn't come straight off an NPC corpse — raid chests,
+	 * Covers loot that doesn't come straight off an NPC corpse - raid chests,
 	 * barrows chests, clue caskets and so on.
 	 *
 	 * <p>Every loot event represents something actually obtained in game. Buying
@@ -542,7 +542,7 @@ public class BingoPlugin extends Plugin
 				// network round trip (which is what made it feel delayed).
 				playDropEmote();
 				// Reading the item name needs the client thread, and we're on it
-				// here — resolve it now rather than inside the upload callback.
+				// here - resolve it now rather than inside the upload callback.
 				captureAndSubmit(tile, item.getId(), itemName(item.getId()));
 			}
 		}
@@ -564,7 +564,7 @@ public class BingoPlugin extends Plugin
 	private void captureAndSubmit(BoardResponse.Tile tile, int itemId, String itemName)
 	{
 		// Whatever's already on screen (including the codeword overlay, if the player has it on)
-		// just gets picked up as part of this frame like any other overlay — see
+		// just gets picked up as part of this frame like any other overlay - see
 		// BingoCodewordOverlay's class doc for why there's no separate capture-only overlay anymore.
 		drawManager.requestNextFrameListener(image -> {
 			// Copy the frame before leaving the render callback: the Image the
@@ -598,7 +598,7 @@ public class BingoPlugin extends Plugin
 			png,
 			() -> onSubmitted(itemName, tile.name),
 			error -> {
-				// A transport failure is worth retrying — both immediately on
+				// A transport failure is worth retrying - both immediately on
 				// the next matching drop (the dedupe window, not "forever", is
 				// what lets a genuine re-drop after a later admin rejection go
 				// through) and via the retry queue in case no further drop
@@ -612,7 +612,7 @@ public class BingoPlugin extends Plugin
 						enqueueRetry(item);
 					}
 				}
-				notifyPlayer(itemName + " not submitted — " + error);
+				notifyPlayer(itemName + " not submitted - " + error);
 			});
 	}
 
@@ -625,7 +625,7 @@ public class BingoPlugin extends Plugin
 			if (dropped != null)
 			{
 				pendingStore.remove(dropped);
-				log.warn("Bingo retry queue full — dropping oldest queued item {}", dropped.id);
+				log.warn("Bingo retry queue full - dropping oldest queued item {}", dropped.id);
 			}
 		}
 		retryQueue.add(item);
@@ -651,7 +651,7 @@ public class BingoPlugin extends Plugin
 		byte[] png = pendingStore.readScreenshot(item);
 		if (png == null)
 		{
-			// The screenshot itself is gone (disk issue between sessions) —
+			// The screenshot itself is gone (disk issue between sessions) -
 			// nothing left to retry with.
 			pendingStore.remove(item);
 			return;
@@ -674,7 +674,7 @@ public class BingoPlugin extends Plugin
 				else
 				{
 					pendingStore.remove(item);
-					notifyPlayer(item.itemName + " not submitted — " + error);
+					notifyPlayer(item.itemName + " not submitted - " + error);
 				}
 			});
 	}
@@ -687,14 +687,14 @@ public class BingoPlugin extends Plugin
 	}
 
 	/**
-	 * Plays the Party emote — purely a local rendering override, not a real
+	 * Plays the Party emote - purely a local rendering override, not a real
 	 * triggered emote. {@code Actor.setAnimation} is the same mechanism the
 	 * game engine itself uses to play idle/walk animations on any actor.
 	 * It's never sent to the server, so nobody else sees it, and it doesn't
 	 * block or delay any real action: the next real animation update
 	 * (walking, attacking, anything) simply overwrites it, same as it would
 	 * overwrite a real emote. Called from handleLoot() at the moment a
-	 * matching drop is detected, not from the upload's success callback —
+	 * matching drop is detected, not from the upload's success callback -
 	 * it's cosmetic, so it shouldn't wait out a screenshot-encode + network
 	 * round trip.
 	 */
@@ -725,8 +725,8 @@ public class BingoPlugin extends Plugin
 	/**
 	 * The clan commands (!rank, !verify, !needed, !live, the sync reminder)
 	 * always show their result regardless of the "Chat message on submit"
-	 * toggle — that setting is specifically about drop-submission
-	 * notifications, not a command the player just typed — which is also
+	 * toggle - that setting is specifically about drop-submission
+	 * notifications, not a command the player just typed - which is also
 	 * why they pass their own clanMessageColor() here rather than sharing
 	 * submitMessageColor: a bingo drop notification and a clan command
 	 * reply aren't the same kind of message, so one color config shouldn't
@@ -741,11 +741,11 @@ public class BingoPlugin extends Plugin
 	/**
 	 * Handles "!rank [name]" once it's actually been sent (this is
 	 * registerCommandAsync's execute callback, run off the client thread
-	 * already). No name defaults to the sender — chatMessage.getName() is
+	 * already). No name defaults to the sender - chatMessage.getName() is
 	 * this message's own author for a real sent message, so no client-thread
 	 * hop is needed to read it the way client.getLocalPlayer() would require.
-	 * A usage mistake only gets a private reply — nothing worth other
-	 * viewers seeing — but a real lookup result or failure rewrites the sent
+	 * A usage mistake only gets a private reply - nothing worth other
+	 * viewers seeing - but a real lookup result or failure rewrites the sent
 	 * message itself via setChatReply, same as !lvl/!kc. No plugin key
 	 * needed: this is a clan-wide feature, not a bingo one.
 	 */
@@ -764,7 +764,7 @@ public class BingoPlugin extends Plugin
 	}
 
 	/**
-	 * Handles "!verify [name]" — same shape as !rank, but a different,
+	 * Handles "!verify [name]" - same shape as !rank, but a different,
 	 * stricter check: the clan's hard gear/kc gate (see VERIFY_COMMAND's
 	 * doc) rather than the rank-tier ladder. Kept as its own command
 	 * rather than folded into !rank's reply since they answer genuinely
@@ -785,7 +785,7 @@ public class BingoPlugin extends Plugin
 	}
 
 	/**
-	 * Handles "!needed [name]" — same shape as !rank (real sent message,
+	 * Handles "!needed [name]" - same shape as !rank (real sent message,
 	 * self by default, rewritten in place with the result), just reporting
 	 * what's missing for the next rank tier instead of the current one.
 	 * Kept as its own command rather than folded into !rank's reply so
@@ -807,7 +807,7 @@ public class BingoPlugin extends Plugin
 
 	/**
 	 * Handles "!live" the same way as !rank: a real sent message that
-	 * setChatReply then overwrites with the result. Needs no plugin key —
+	 * setChatReply then overwrites with the result. Needs no plugin key -
 	 * live status is public site data, same as the site's own homepage.
 	 */
 	private void onLiveCommand(ChatMessage chatMessage, String message)
@@ -826,7 +826,7 @@ public class BingoPlugin extends Plugin
 
 	/**
 	 * Overwrites the already-sent message's displayed text with the lookup
-	 * result — RuneLite's own bundled chat commands (!lvl, !kc, ...) use
+	 * result - RuneLite's own bundled chat commands (!lvl, !kc, ...) use
 	 * this exact mechanism. Purely a local rendering override, same family
 	 * as playDropEmote()'s Actor.setAnimation: it changes nothing on the
 	 * wire, so it only shows up for other viewers whose own client also has
@@ -846,7 +846,7 @@ public class BingoPlugin extends Plugin
 	{
 		if ("not-on-runeprofile".equals(reason))
 		{
-			return rsn + " hasn't synced RuneProfile yet — install it and open your collection log.";
+			return rsn + " hasn't synced RuneProfile yet - install it and open your collection log.";
 		}
 		return "Rank lookup for " + rsn + " failed - " + error;
 	}
@@ -920,7 +920,7 @@ public class BingoPlugin extends Plugin
 	/**
 	 * Backs the "Notify me when clan members go live" toggle. The first
 	 * check after startUp/reconnect only seeds previouslyLiveUsernames
-	 * silently — otherwise everyone already live at that moment would get
+	 * silently - otherwise everyone already live at that moment would get
 	 * announced as "newly" live just because the plugin only just started
 	 * watching.
 	 */
@@ -960,7 +960,7 @@ public class BingoPlugin extends Plugin
 	/**
 	 * Backs the "Remind me to sync RuneProfile" toggle. Only ever detects
 	 * "never set up on RuneProfile at all" (a 404 from the site, see
-	 * BingoApiClient#lookupRank's reason field) — there's no confirmed way
+	 * BingoApiClient#lookupRank's reason field) - there's no confirmed way
 	 * to tell a stale-but-present sync from a fresh one, so that case isn't
 	 * covered. Runs once per session, right after login.
 	 */
@@ -982,7 +982,7 @@ public class BingoPlugin extends Plugin
 			(error, reason) -> {
 				if ("not-on-runeprofile".equals(reason))
 				{
-					sendChatMessage("You haven't synced RuneProfile yet — install it and open your"
+					sendChatMessage("You haven't synced RuneProfile yet - install it and open your"
 						+ " collection log so rank checks can see your progress.", config.clanMessageColor());
 				}
 			});
@@ -996,7 +996,7 @@ public class BingoPlugin extends Plugin
 	 * message. The last-shown timestamp is persisted via ConfigManager
 	 * (rather than kept in memory like checkedRuneProfileSync above) since a
 	 * broadcast can happen at any point during play, not just once per
-	 * session — an in-memory flag would re-show the same message after every
+	 * session - an in-memory flag would re-show the same message after every
 	 * client restart.
 	 */
 	private void checkBroadcast()
@@ -1029,7 +1029,7 @@ public class BingoPlugin extends Plugin
 	 * Backs the "Wise Old Man competitions" toggle: announces once, in chat,
 	 * whenever a new Skill/Boss of the Week competition goes from "not
 	 * running" to "ongoing". The last-announced competition id is persisted
-	 * via ConfigManager, same reasoning as LAST_SEEN_BROADCAST_KEY above — an
+	 * via ConfigManager, same reasoning as LAST_SEEN_BROADCAST_KEY above - an
 	 * in-memory-only flag would re-announce the same still-running
 	 * competition after every client restart. The very first check after
 	 * enabling this only seeds the stored id silently (same pattern as
@@ -1059,7 +1059,7 @@ public class BingoPlugin extends Plugin
 				configManager.setConfiguration(BingoConfig.GROUP, LAST_ANNOUNCED_WOM_COMPETITION_KEY, id);
 				if (lastAnnounced == null)
 				{
-					// First check ever — seed silently rather than announcing whatever's already running.
+					// First check ever - seed silently rather than announcing whatever's already running.
 					return;
 				}
 				sendChatMessage(

@@ -183,7 +183,7 @@ public interface BingoConfig extends Config
 	@ConfigItem(
 		keyName = "showLiveCodewordOverlay",
 		name = "Display codeword",
-		description = "Show the codeword in a movable, resizable box on screen the whole session — drag it to"
+		description = "Show the codeword in a movable, resizable box on screen the whole session - drag it to"
 			+ " move, drag a corner to resize (squish it into a thin strip to save screen space). If it's on"
 			+ " when a bingo proof is captured, the codeword ends up baked into that screenshot too, the same"
 			+ " way any other on-screen overlay would.",
