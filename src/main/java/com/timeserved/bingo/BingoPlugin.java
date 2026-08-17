@@ -89,9 +89,6 @@ public class BingoPlugin extends Plugin
 	private BingoCodewordOverlay codewordOverlay;
 
 	@Inject
-	private WomEventClient womEventClient;
-
-	@Inject
 	private ChatCommandManager chatCommandManager;
 
 	@Inject
@@ -419,7 +416,6 @@ public class BingoPlugin extends Plugin
 		checkBingoStatus();
 		checkLiveStreams();
 		checkBroadcast();
-		checkWomEvents();
 	}
 
 	/**
@@ -687,7 +683,7 @@ public class BingoPlugin extends Plugin
 	}
 
 	/**
-	 * Plays the Party emote - purely a local rendering override, not a real
+	 * Plays the Crab dance emote - purely a local rendering override, not a real
 	 * triggered emote. {@code Actor.setAnimation} is the same mechanism the
 	 * game engine itself uses to play idle/walk animations on any actor.
 	 * It's never sent to the server, so nobody else sees it, and it doesn't
@@ -708,7 +704,7 @@ public class BingoPlugin extends Plugin
 			Player local = client.getLocalPlayer();
 			if (local != null)
 			{
-				local.setAnimation(AnimationID.EMOTE_PARTY);
+				local.setAnimation(AnimationID.HUMAN_EMOTE_CRABDANCE);
 			}
 		});
 	}
@@ -831,13 +827,22 @@ public class BingoPlugin extends Plugin
 	 * as playDropEmote()'s Actor.setAnimation: it changes nothing on the
 	 * wire, so it only shows up for other viewers whose own client also has
 	 * this command registered.
+	 *
+	 * <p>Deliberately no explicit color tag here, unlike sendChatMessage()'s
+	 * synthesized notifications - this is rewriting a message that was
+	 * already sent in whatever channel the player actually typed it into
+	 * (clan chat, public chat, a friends chat, ...), so leaving it uncolored
+	 * lets it inherit that channel's own color the same way !lvl/!kc's
+	 * replies do, including anyone's own "Chat Colors" plugin customization
+	 * for that channel. Forcing clanMessageColor() here would override that
+	 * per-channel color with one fixed color regardless of where the command
+	 * was actually typed.
 	 */
 	private void setChatReply(ChatMessage chatMessage, String reply)
 	{
-		String colored = ColorUtil.wrapWithColorTag(reply, config.clanMessageColor());
 		clientThread.invokeLater(() -> {
 			MessageNode messageNode = chatMessage.getMessageNode();
-			messageNode.setRuneLiteFormatMessage(colored);
+			messageNode.setRuneLiteFormatMessage(reply);
 			client.refreshChat();
 		});
 	}
@@ -860,9 +865,8 @@ public class BingoPlugin extends Plugin
 	private String formatClanRequirementResult(BingoApiClient.ClanRequirementResult result)
 	{
 		return result.meets
-			? result.rsn + " meets the clan requirements - " + result.reason
-			: result.rsn + " does not meet the clan requirements yet (needs 6 Crystal Armour Seeds + an"
-				+ " Enhanced Crystal Weapon Seed, 800+ Corrupted Gauntlet kc, or a Twisted Bow).";
+			? result.rsn + " meets the clan requirements"
+			: result.rsn + " does not meet the clan requirements";
 	}
 
 	private String formatNeededResult(BingoApiClient.RankLookupResult result)
@@ -1021,51 +1025,5 @@ public class BingoPlugin extends Plugin
 				sendChatMessage(result.message, config.clanMessageColor());
 			},
 			error -> log.debug("Failed to check broadcast: {}", error));
-	}
-
-	private static final String LAST_ANNOUNCED_WOM_COMPETITION_KEY = "lastAnnouncedWomCompetition";
-
-	/**
-	 * Backs the "Wise Old Man competitions" toggle: announces once, in chat,
-	 * whenever a new Skill/Boss of the Week competition goes from "not
-	 * running" to "ongoing". The last-announced competition id is persisted
-	 * via ConfigManager, same reasoning as LAST_SEEN_BROADCAST_KEY above - an
-	 * in-memory-only flag would re-announce the same still-running
-	 * competition after every client restart. The very first check after
-	 * enabling this only seeds the stored id silently (same pattern as
-	 * previouslyLiveUsernames in checkLiveStreams) so a competition that's
-	 * already been running for days doesn't get announced as "new" just
-	 * because the plugin only just started watching.
-	 */
-	private void checkWomEvents()
-	{
-		if (!config.notifyWomEvents())
-		{
-			return;
-		}
-
-		womEventClient.fetchOngoingCompetition(
-			competition -> {
-				String lastAnnounced = configManager.getConfiguration(BingoConfig.GROUP, LAST_ANNOUNCED_WOM_COMPETITION_KEY);
-				if (competition == null)
-				{
-					return;
-				}
-				String id = String.valueOf(competition.id);
-				if (id.equals(lastAnnounced))
-				{
-					return;
-				}
-				configManager.setConfiguration(BingoConfig.GROUP, LAST_ANNOUNCED_WOM_COMPETITION_KEY, id);
-				if (lastAnnounced == null)
-				{
-					// First check ever - seed silently rather than announcing whatever's already running.
-					return;
-				}
-				sendChatMessage(
-					"New Wise Old Man competition: " + competition.title + " (" + competition.metric + ")",
-					config.clanMessageColor());
-			},
-			error -> log.debug("Failed to check Wise Old Man competitions: {}", error));
 	}
 }

@@ -1,8 +1,8 @@
 # Time Served
 
 A RuneLite plugin for the Time Served clan: general clan tooling (chat
-commands, live-stream/broadcast/competition notifications) plus automatic
-bingo tile proof submission. When you receive a drop that matches one of your
+commands, live-stream/broadcast notifications) plus automatic bingo tile
+proof submission. When you receive a drop that matches one of your
 team's bingo tiles, it screenshots your client and submits it as proof to the
 clan site automatically, so nobody has to take and upload screenshots by hand.
 
@@ -19,10 +19,8 @@ clan site automatically, so nobody has to take and upload screenshots by hand.
   Corrupted Gauntlet kc, or a Twisted Bow.
 - **`!needed [name]`** - what's missing for the next rank tier up.
 - **`!live`** - which clan members are currently streaming on Twitch.
-- **Live-stream, broadcast, and Wise Old Man competition notifications** -
-  optional chat messages when a clan member goes live, an admin posts a
-  broadcast from the site, or a new Skill/Boss of the Week competition
-  starts.
+- **Live-stream and broadcast notifications** - optional chat messages when
+  a clan member goes live, or an admin posts a broadcast from the site.
 - **Sidebar panel** - your team's board, goal-tile progress, and a clan
   leaderboard.
 - **On-screen codeword overlay** - an optional, draggable overlay showing an
@@ -50,9 +48,6 @@ config toggle.
   clan site which of its configured Twitch channels are currently live.
 - **Broadcast notifications**: polls the clan site for the latest
   admin-posted message; sends nothing.
-- **Wise Old Man competition notifications** (opt-in, off by default): calls
-  Wise Old Man's own public API directly (`api.wiseoldman.net`), not the clan
-  site - sends nothing beyond the request itself.
 
 ## Setup
 

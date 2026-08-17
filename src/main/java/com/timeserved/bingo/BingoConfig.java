@@ -76,23 +76,11 @@ public interface BingoConfig extends Config
 	}
 
 	@ConfigItem(
-		keyName = "notifyWomEvents",
-		name = "Wise Old Man competitions",
-		description = "Post a chat message when a new Skill of the Week / Boss of the Week competition starts.",
-		section = clanSection,
-		position = 6
-	)
-	default boolean notifyWomEvents()
-	{
-		return false;
-	}
-
-	@ConfigItem(
 		keyName = "enableClanCommands",
 		name = "Clan chat commands",
 		description = "Turn off the !rank, !verify, !needed, and !live chat commands entirely.",
 		section = clanSection,
-		position = 7
+		position = 6
 	)
 	default boolean enableClanCommands()
 	{
@@ -102,14 +90,14 @@ public interface BingoConfig extends Config
 	@Alpha
 	@ConfigItem(
 		keyName = "clanMessageColor",
-		name = "Clan message color",
-		description = "Configure the color of clan chat messages, reminders, and broadcasts.",
+		name = "Clan notification color",
+		description = "Configure the color of broadcast, live-stream, and RuneProfile-sync notifications.",
 		section = clanSection,
-		position = 8
+		position = 7
 	)
 	default Color clanMessageColor()
 	{
-		return new Color(97, 175, 239);
+		return new Color(0xFFFFFF80, true);
 	}
 
 	@ConfigSection(
@@ -121,7 +109,7 @@ public interface BingoConfig extends Config
 
 	@ConfigItem(
 		keyName = "showSidebar",
-		name = "Show sidebar",
+		name = "Show bingo board",
 		description = "Show the bingo board tab in the sidebar. Turn off to hide the icon entirely.",
 		section = bingoSection,
 		position = 6
@@ -153,13 +141,13 @@ public interface BingoConfig extends Config
 	)
 	default Color submitMessageColor()
 	{
-		return new Color(0, 200, 83);
+		return new Color(0xFF00FF6A, true);
 	}
 
 	@ConfigItem(
 		keyName = "playDropEmote",
-		name = "Emote on bingo drop",
-		description = "Perform an emote when you receive a bingo drop.",
+		name = "Crab dance on bingo drop",
+		description = "Perform a silly crab dance when you receive a bingo drop.",
 		section = bingoSection,
 		position = 9
 	)
@@ -169,26 +157,11 @@ public interface BingoConfig extends Config
 	}
 
 	@ConfigItem(
-		keyName = "verificationCode",
-		name = "Codeword",
-		description = "Whatever code your clan admin announced for the current event.",
-		section = bingoSection,
-		position = 12
-	)
-	default String verificationCode()
-	{
-		return "";
-	}
-
-	@ConfigItem(
 		keyName = "showLiveCodewordOverlay",
 		name = "Display codeword",
-		description = "Show the codeword in a movable, resizable box on screen the whole session - drag it to"
-			+ " move, drag a corner to resize (squish it into a thin strip to save screen space). If it's on"
-			+ " when a bingo proof is captured, the codeword ends up baked into that screenshot too, the same"
-			+ " way any other on-screen overlay would.",
+		description = "Displays an event codeword overlay on screen.",
 		section = bingoSection,
-		position = 13
+		position = 12
 	)
 	default boolean showLiveCodewordOverlay()
 	{
@@ -196,10 +169,21 @@ public interface BingoConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "verificationCode",
+		name = "Codeword",
+		description = "Whatever code your clan admin announced for the current event.",
+		section = bingoSection,
+		position = 13
+	)
+	default String verificationCode()
+	{
+		return "";
+	}
+
+	@ConfigItem(
 		keyName = "showCodewordTimestamp",
 		name = "Show timestamp",
-		description = "Add a live UTC timestamp next to the codeword. Turning this off means a captured proof"
-			+ " screenshot no longer has anything proving *when* it was taken, just the codeword itself.",
+		description = "Attach a timestamp to the codeword overlay.",
 		section = bingoSection,
 		position = 14
 	)
