@@ -10,13 +10,10 @@ import java.awt.image.BufferedImage;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import javax.imageio.ImageIO;
 import javax.swing.JFrame;
 import javax.swing.SwingUtilities;
 import net.runelite.client.ui.PluginPanel;
-import org.junit.AfterClass;
 import org.junit.Test;
 
 import static org.junit.Assert.assertNotNull;
@@ -31,14 +28,6 @@ import static org.junit.Assert.assertTrue;
  */
 public class BingoPanelTest
 {
-	private static final ScheduledExecutorService EXECUTOR = Executors.newSingleThreadScheduledExecutor();
-
-	@AfterClass
-	public static void shutdown()
-	{
-		EXECUTOR.shutdownNow();
-	}
-
 	private static BoardResponse fixtureBoard()
 	{
 		BoardResponse board = new BoardResponse();
@@ -189,7 +178,9 @@ public class BingoPanelTest
 
 		BingoPanel[] holder = new BingoPanel[1];
 		SwingUtilities.invokeAndWait(() -> {
-			BingoPanel panel = new BingoPanel(EXECUTOR);
+			// null ItemManager is safe here: none of the fixture tiles set itemIds, so
+			// loadIconInto() returns before ever touching it.
+			BingoPanel panel = new BingoPanel(null);
 			panel.refresh(board);
 			holder[0] = panel;
 		});
@@ -264,7 +255,9 @@ public class BingoPanelTest
 
 		BingoPanel[] holder = new BingoPanel[1];
 		SwingUtilities.invokeAndWait(() -> {
-			BingoPanel panel = new BingoPanel(EXECUTOR);
+			// null ItemManager is safe here: none of the fixture tiles set itemIds, so
+			// loadIconInto() returns before ever touching it.
+			BingoPanel panel = new BingoPanel(null);
 			panel.refresh(board);
 			holder[0] = panel;
 		});

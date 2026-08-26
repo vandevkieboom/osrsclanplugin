@@ -77,7 +77,6 @@ public class BoardResponse
 		public String tileId;
 		public int position;
 		public String name;
-		public String iconUrl;
 		public int requiredCount;
 		public int approvedCount;
 		public int pendingCount;
