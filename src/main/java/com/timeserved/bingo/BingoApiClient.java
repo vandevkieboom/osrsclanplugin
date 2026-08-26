@@ -26,6 +26,18 @@ import okhttp3.ResponseBody;
  *
  * <p>All requests are asynchronous: they're triggered from game event handlers,
  * which run on the client thread, and blocking that would stutter the game.
+ *
+ * <p>Every URL this plugin ever connects to is either this hardcoded
+ * {@code BASE_URL} or, for tile icons, RuneLite's own item sprite cache via
+ * {@code ItemManager} (see {@code BingoPanel#loadIconInto}) - never a URL
+ * taken from an API response. An earlier version of the tile-icon path had
+ * the site send a per-tile {@code iconUrl} that the panel fetched directly
+ * with {@code ImageIO.read(new URL(...))}; Plugin Hub review flagged that as
+ * exactly the pattern not allowed (a plugin dereferencing a URL supplied by
+ * its own API response, rather than one from the user or baked into the
+ * jar), so it was replaced with item-id-based icons from {@code ItemManager}
+ * instead. Don't reintroduce a server-supplied URL for anything the plugin
+ * fetches.
  */
 @Slf4j
 @Singleton

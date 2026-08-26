@@ -17,16 +17,11 @@ import java.awt.Rectangle;
 import java.awt.RenderingHints;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
-import java.awt.image.BufferedImage;
-import java.io.IOException;
-import java.net.URL;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ScheduledExecutorService;
-import javax.imageio.ImageIO;
 import javax.inject.Inject;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
@@ -41,9 +36,11 @@ import javax.swing.SwingUtilities;
 import javax.swing.Timer;
 import javax.swing.border.EmptyBorder;
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.client.game.ItemManager;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.PluginPanel;
+import net.runelite.client.util.AsyncBufferedImage;
 
 /**
  * The clan bingo sidebar tab: the caller's team board, any xp/kc goal tiles, a clan-wide leaderboard,
@@ -69,8 +66,10 @@ public class BingoPanel extends PluginPanel
 	private static final int CONTENT_WIDTH =
 		PluginPanel.PANEL_WIDTH - PluginPanel.SCROLLBAR_WIDTH - CONTENT_PADDING * 2;
 
-	private final ScheduledExecutorService executor;
-	private final Map<String, ImageIcon> iconCache = new ConcurrentHashMap<>();
+	private final ItemManager itemManager;
+	/** Scaled tile icons, keyed by item id. Item sprites come from the client's own game cache via
+	 * ItemManager, not a URL from the API response - see BingoApiClient's class doc for why. */
+	private final Map<Integer, ImageIcon> iconCache = new ConcurrentHashMap<>();
 	/** Which collapsible sections are open, keyed by a short section id. Survives refresh()'s full
 	 * teardown-and-rebuild - otherwise every board poll would silently re-expand anything you'd closed. */
 	private final Map<String, Boolean> sectionExpanded = new HashMap<>();
@@ -83,10 +82,10 @@ public class BingoPanel extends PluginPanel
 	private volatile long lastSyncedAt;
 
 	@Inject
-	public BingoPanel(ScheduledExecutorService executor)
+	public BingoPanel(ItemManager itemManager)
 	{
 		super(false);
-		this.executor = executor;
+		this.itemManager = itemManager;
 
 		setBackground(ColorScheme.DARK_GRAY_COLOR);
 		setLayout(new BorderLayout());
@@ -289,7 +288,7 @@ public class BingoPanel extends PluginPanel
 					: TileCell.State.EMPTY;
 				TileCell cell = new TileCell(state);
 				cell.setToolTipText(tile.name);
-				loadIconInto(cell, tile.iconUrl);
+				loadIconInto(cell, tile.getItemIds());
 				grid.add(cell);
 			}
 			body.add(grid);
@@ -307,35 +306,30 @@ public class BingoPanel extends PluginPanel
 		return slot;
 	}
 
-	private void loadIconInto(TileCell cell, String iconUrl)
+	/**
+	 * Icons come from the client's own item sprite cache via ItemManager, keyed by item id - not a URL
+	 * taken from the board API response (see BingoApiClient's class doc for why that's off the table).
+	 * Goal tiles have no item ids and are left blank here; they render their own progress elsewhere.
+	 */
+	private void loadIconInto(TileCell cell, List<Integer> itemIds)
 	{
-		if (iconUrl == null || iconUrl.isEmpty())
+		if (itemIds.isEmpty())
 		{
 			return;
 		}
-		ImageIcon cached = iconCache.get(iconUrl);
+		int itemId = itemIds.get(0);
+		ImageIcon cached = iconCache.get(itemId);
 		if (cached != null)
 		{
 			cell.setIcon(cached);
 			return;
 		}
-		executor.execute(() -> {
-			try
-			{
-				BufferedImage image = ImageIO.read(new URL(iconUrl));
-				if (image == null)
-				{
-					return;
-				}
-				Image scaled = image.getScaledInstance(TILE_ICON_PX, TILE_ICON_PX, Image.SCALE_SMOOTH);
-				ImageIcon icon = new ImageIcon(scaled);
-				iconCache.put(iconUrl, icon);
-				SwingUtilities.invokeLater(() -> cell.setIcon(icon));
-			}
-			catch (IOException e)
-			{
-				log.debug("Failed to load tile icon {}", iconUrl, e);
-			}
+		AsyncBufferedImage image = itemManager.getImage(itemId);
+		image.onLoaded(() -> {
+			Image scaled = image.getScaledInstance(TILE_ICON_PX, TILE_ICON_PX, Image.SCALE_SMOOTH);
+			ImageIcon icon = new ImageIcon(scaled);
+			iconCache.put(itemId, icon);
+			SwingUtilities.invokeLater(() -> cell.setIcon(icon));
 		});
 	}
 
