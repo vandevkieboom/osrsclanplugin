@@ -20,7 +20,12 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.Iterator;
+import javax.imageio.IIOImage;
 import javax.imageio.ImageIO;
+import javax.imageio.ImageWriteParam;
+import javax.imageio.ImageWriter;
+import javax.imageio.stream.ImageOutputStream;
 import javax.inject.Inject;
 import javax.swing.SwingUtilities;
 import lombok.extern.slf4j.Slf4j;
@@ -154,12 +159,12 @@ public class BingoPlugin extends Plugin
 	private boolean checkedRuneProfileSync;
 
 	/**
-	 * Whether the site last reported an active bingo event. Kept current by
-	 * checkBingoStatus, a separate, deliberately tiny/cheap/cached request
-	 * (see BingoApiClient#fetchBingoStatus) that runs every scheduled tick
-	 * regardless of this value - unlike the actual board fetch, which is
-	 * expensive (tiles/teams/submissions) and only ever runs while this is
-	 * true. Defaults true so the plugin behaves normally until it's actually
+	 * Whether the site last reported an active bingo event, from the combined
+	 * poll (see BingoApiClient#fetchPluginPoll). The expensive board fetch
+	 * only ever runs while this is true, so between events the plugin's bingo
+	 * half costs nothing at all while its clan half (chat commands,
+	 * live-stream and broadcast notifications) keeps working normally.
+	 * Defaults true so the plugin behaves normally until it has actually
 	 * heard otherwise, rather than starting paused on a fresh session.
 	 */
 	private volatile boolean bingoActive = true;
@@ -268,7 +273,10 @@ public class BingoPlugin extends Plugin
 			enqueueRetry(item);
 		}
 
-		refreshBoard();
+		// Fills the sidebar panel straight away rather than leaving it empty
+		// until the first tick. Everything after this goes through poll().
+		refreshMyTeam();
+		forceRefreshBoard();
 	}
 
 	/**
@@ -311,6 +319,15 @@ public class BingoPlugin extends Plugin
 		previouslyLiveUsernames = null;
 		checkedRuneProfileSync = false;
 		bingoActive = true;
+		lastBoardStamp = null;
+		nextPollAllowedAt = 0L;
+		lastPollAt = 0L;
+		consecutivePollFailures = 0;
+		pollIntervalMillis = POLL_INTERVAL_DEFAULT_MILLIS;
+		lastBoardFetchAt = 0L;
+		lastMyTeamFetchAt = 0L;
+		myTeamId = null;
+		panelWasVisible = false;
 	}
 
 	/** Idempotent - safe to call when the commands are already registered (guarded by commandsRegistered). */
@@ -347,17 +364,14 @@ public class BingoPlugin extends Plugin
 		if (event.getGameState() == GameState.LOGGED_IN)
 		{
 			// Fires on every area/instance load, not just a literal login -
-			// during something like raids or minigames this can happen many
-			// times in quick succession, so the expensive board fetch only
-			// runs here if bingo is actually active; checkBingoStatus's next
-			// tick picks up a reactivation regardless of how long it's been
-			// since this last fired.
-			if (bingoActive)
-			{
-				refreshBoard();
-			}
+			// during something like raids this can happen many times in quick
+			// succession. So this asks for a poll rather than a board fetch:
+			// poll() rate-limits itself and only fetches the board if it has
+			// actually changed, which makes a burst of instance loads cost
+			// nothing while still getting a real logging-in player caught up
+			// immediately instead of up to a minute later.
+			poll();
 			checkRuneProfileSync();
-			checkBroadcast();
 		}
 	}
 
@@ -370,7 +384,10 @@ public class BingoPlugin extends Plugin
 		}
 		if ("apiKey".equals(event.getKey()))
 		{
-			refreshBoard();
+			// A new key can mean a different member, and so a different
+			// team - re-resolve both rather than wait for a tick.
+			refreshMyTeam();
+			forceRefreshBoard();
 		}
 		else if ("showSidebar".equals(event.getKey()))
 		{
@@ -397,46 +414,432 @@ public class BingoPlugin extends Plugin
 	}
 
 	/**
-	 * Runs every minute for every plugin user, forever - this is a general
-	 * clan tool (chat commands, live-stream/broadcast notifications), not a
-	 * bingo-only one, so most installs run this whether or not a bingo event
-	 * even exists. checkBingoStatus is a deliberately tiny, cached, near-free
-	 * request (see BingoApiClient#fetchBingoStatus) that's cheap enough to
-	 * run every tick regardless - the actual expensive work (refreshBoard,
-	 * which queries tiles/teams/submissions) only happens on ticks where
-	 * that check says a bingo event is genuinely active, so there's nothing
-	 * bingo-related running at all beyond one tiny cached ping while no
-	 * event is on. checkLiveStreams/checkBroadcast stay on this same
-	 * 1-minute cadence unconditionally - going live or an admin broadcast
-	 * are both things worth surfacing promptly.
+	 * The plugin's whole periodic workload: one request, once a minute, and
+	 * only while actually logged in.
+	 *
+	 * <p>This used to be three requests every minute - bingo status, clan
+	 * broadcast, live streams - fired unconditionally for as long as the
+	 * client was open, logged in or not. That is roughly 4,300 requests per
+	 * member per day doing nothing, and across the clan it was enough to
+	 * exhaust the site's hosting quotas outright, at which point the site
+	 * started failing for everyone. Two changes fix that without making
+	 * anything slower to arrive:
+	 *
+	 * <ul>
+	 *   <li>The three requests became one (see
+	 *       BingoApiClient#fetchPluginPoll). They were always fetched on the
+	 *       same tick, so nothing waits any longer than before.</li>
+	 *   <li>Nothing runs while logged out. Every one of these results is
+	 *       delivered as a game chat message or a board the player is looking
+	 *       at in-game, so polling at the login screen was spending requests
+	 *       on notifications that had nowhere to go.</li>
+	 * </ul>
+	 *
+	 * <p>The tick itself is deliberately still one minute: the point was
+	 * never to make members wait longer for a rank, a broadcast or a board
+	 * update, it was to stop paying for the same three answers over and over.
 	 */
 	@Schedule(period = 1, unit = ChronoUnit.MINUTES, asynchronous = true)
 	public void scheduledRefresh()
 	{
-		checkBingoStatus();
-		checkLiveStreams();
-		checkBroadcast();
+		poll();
+		checkBoardState();
 	}
 
 	/**
-	 * The only thing that runs every tick regardless of whether bingo is
-	 * active - see fetchBingoStatus's doc for why this is safe to do at
-	 * this frequency. Triggers the real (expensive) refreshBoard only once
-	 * this comes back true; otherwise nothing bingo-related happens this
-	 * tick at all.
+	 * The fast half of the tick, and the only part that is bingo-specific.
+	 *
+	 * <p>Runs every minute, but only for members who are actually competing -
+	 * on a team, with an event running. It asks one tiny question ("has the
+	 * board changed?") rather than riding along on the announcement poll,
+	 * because that coupling used to set the announcement rate by whoever needed
+	 * the board most: members in a bingo team heard about a stream going live
+	 * or an admin's message sooner than the rest of the clan, purely because
+	 * their plugin happened to be talking to the site more often. Announcements
+	 * belong to everybody and now travel at one speed for everybody; this is
+	 * what actually needed to be quick, for the few people it applies to.
 	 */
-	private void checkBingoStatus()
+	private void checkBoardState()
 	{
-		api.fetchBingoStatus(
-			status -> {
-				bingoActive = status.bingoActive;
-				if (bingoActive)
+		if (!bingoActive || myTeamId == null || client.getGameState() != GameState.LOGGED_IN)
+		{
+			return;
+		}
+		if (System.currentTimeMillis() < nextPollAllowedAt)
+		{
+			return;
+		}
+
+		api.fetchBoardState(
+			state -> {
+				// Shares its success/failure signal with poll() below on
+				// purpose: whichever of the two requests failed, an outage is
+				// an outage, and both must back off together. A participant
+				// otherwise keeps hammering this endpoint every minute with no
+				// backoff at all while everyone else correctly quiets down -
+				// exactly the pile-on the backoff exists to prevent, and worse
+				// here since participants are already the most frequent
+				// callers.
+				consecutivePollFailures = 0;
+				nextPollAllowedAt = 0L;
+
+				bingoActive = state.bingoActive;
+				if (!state.bingoActive)
 				{
-					refreshBoard();
-					retryPendingSubmissions();
+					return;
+				}
+				if (shouldRefreshBoard(state.boardChangedAt))
+				{
+					refreshBoard(state.boardChangedAt);
+				}
+				retryPendingSubmissions();
+			},
+			this::onPollFailed);
+	}
+
+	private volatile boolean panelWasVisible;
+
+	/**
+	 * Notices the sidebar panel being opened and fetches a board for it.
+	 *
+	 * <p>Costs nothing on its own - it is a local Swing check, no network -
+	 * but it is what makes it safe for shouldRefreshBoard to skip fetching a
+	 * board while nobody is looking at one. Without it, opening the panel
+	 * would show a stale board until the next scheduled tick came round.
+	 */
+	@Schedule(period = 5, unit = ChronoUnit.SECONDS, asynchronous = true)
+	public void checkPanelOpened()
+	{
+		boolean visible = bingoPanel.isShowing();
+		boolean opened = visible && !panelWasVisible;
+		panelWasVisible = visible;
+		if (opened && bingoActive && !config.apiKey().trim().isEmpty())
+		{
+			// Deliberately not a cache-busting fetch: nothing has *changed*,
+			// this reader simply doesn't have a copy yet, so the shared cached
+			// one is exactly right. Clearing the marker lets the next poll
+			// re-sync it.
+			lastBoardStamp = null;
+			refreshBoard(null);
+		}
+	}
+
+	/**
+	 * Poll cadence. The scheduler below ticks every minute, but the actual gap
+	 * is whatever the site last asked for (PollResponse#pollSeconds), clamped
+	 * to this range - the server knows whether an event is on, and can be
+	 * retuned without a plugin release, which a hard-coded constant here could
+	 * not be. Defaults to one minute until the site has said otherwise.
+	 */
+	private static final long POLL_INTERVAL_DEFAULT_MILLIS = 60_000L;
+	private static final long POLL_INTERVAL_MIN_MILLIS = 60_000L;
+	private static final long POLL_INTERVAL_MAX_MILLIS = 15 * 60_000L;
+
+	private volatile long pollIntervalMillis = POLL_INTERVAL_DEFAULT_MILLIS;
+
+	/**
+	 * How long to wait after consecutive failures before trying again:
+	 * doubles each time, capped well short of "give up".
+	 *
+	 * <p>Without this, an outage at the site turns every online plugin into a
+	 * client retrying once a minute forever, which is exactly the wrong
+	 * response - it is maximum load at the moment the site can least afford
+	 * it, and it is how a small problem became a total one. Backing off means
+	 * a struggling site gets quieter, not louder, and recovers on its own.
+	 */
+	private static final long BACKOFF_BASE_MILLIS = 60_000L;
+	private static final long BACKOFF_MAX_MILLIS = 15 * 60_000L;
+
+	// All three are read and written from OkHttp's callback threads as well as
+	// from the scheduler thread, so none of them can be a plain field.
+	private volatile long nextPollAllowedAt;
+	private volatile long lastPollAt;
+	private volatile int consecutivePollFailures;
+
+	/**
+	 * Marker for the board this plugin's tile lookup was last built from.
+	 * Null means "unknown" - the next poll fetches the board regardless. See
+	 * BingoApiClient.PollResponse#boardChangedAt.
+	 */
+	private volatile String lastBoardStamp;
+
+	/** When the board was last successfully fetched - see shouldRefreshBoard. */
+	private volatile long lastBoardFetchAt;
+
+	/**
+	 * Which team this plugin key belongs to. No longer part of the board
+	 * response (that is one cached copy shared by everybody), so it is fetched
+	 * separately and kept here. Null until the first fetch succeeds, or when
+	 * the member genuinely is not on a team.
+	 */
+	private volatile String myTeamId;
+
+	private volatile long lastMyTeamFetchAt;
+
+	/**
+	 * Team assignment happens before an event rather than during one, so this
+	 * does not need to be prompt - it needs to eventually be right, at
+	 * negligible cost.
+	 */
+	private static final long MY_TEAM_REFRESH_MILLIS = 30 * 60_000L;
+
+	/**
+	 * How long the plugin will go without re-fetching the board while the
+	 * sidebar panel is closed.
+	 *
+	 * <p>The board changes constantly during a busy event - every submission,
+	 * every hiscores reconcile - and each change would otherwise have every
+	 * online plugin pull the whole thing again. But nearly all of what changes
+	 * that often is display data: standings, teammates submissions, goal
+	 * totals. The only part the plugin needs while nobody is looking is the
+	 * item-id watch list that auto-submission checks drops against, and that
+	 * only changes when an admin edits tiles, which does not happen mid-event.
+	 *
+	 * <p>So: panel open, refresh on every change and stay live. Panel closed,
+	 * refresh at this interval, which keeps the watch list current without
+	 * paying for a board nobody is reading.
+	 */
+	private static final long BACKGROUND_BOARD_REFRESH_MILLIS = 10 * 60_000L;
+
+	/**
+	 * Runs a poll unless one ran too recently or a backoff is in effect.
+	 *
+	 * <p>Callable from anything, including things that fire often: the
+	 * interval check below is the only gate, and it is deliberately the same
+	 * one for a scheduled tick and for a login. An earlier version gave
+	 * login-triggered polls a shorter floor so someone logging in would be
+	 * caught up immediately, which was both unnecessary and expensive -
+	 * GameState.LOGGED_IN fires on every area and instance load, not just a
+	 * real login, so during a raid that shorter floor would have roughly
+	 * doubled the request rate for exactly the players generating the most of
+	 * it. It was also pointless: a player who has actually been logged out is
+	 * one who has not been polling, so their last poll is already older than
+	 * the interval and they get their immediate catch-up from this check
+	 * anyway. An instance load mid-session gets nothing, which is correct -
+	 * they were polled a moment ago.
+	 */
+	private void poll()
+	{
+		// Nothing this fetches can reach the player while they're logged out -
+		// it all arrives as game chat or an in-game board - so polling at the
+		// login screen spends requests on notifications with nowhere to go.
+		if (client.getGameState() != GameState.LOGGED_IN)
+		{
+			return;
+		}
+
+		if (!hasAnythingToPollFor())
+		{
+			return;
+		}
+
+		long now = System.currentTimeMillis();
+		if (now < nextPollAllowedAt)
+		{
+			return;
+		}
+		// A second of slack: the scheduler doesn't fire on exact 60s
+		// boundaries, and without this a 60s cadence checked against a 60s
+		// interval would skip every other tick and silently run at two
+		// minutes.
+		if (now - lastPollAt < pollIntervalMillis - 1_000L)
+		{
+			return;
+		}
+		lastPollAt = now;
+
+		api.fetchPluginPoll(this::onPolled, this::onPollFailed);
+	}
+
+	/**
+	 * Whether this install has any reason to be talking to the site on a timer.
+	 *
+	 * <p>The periodic poll exists to deliver exactly three things: a live-stream
+	 * notice, an admin broadcast, and (for bingo participants) the state of the
+	 * board. Turn the first two off and hold no plugin key, and there is
+	 * nothing left for it to tell you - so it should say nothing rather than
+	 * ask once a minute forever and discard the answer, which is what it used
+	 * to do. The chat commands are unaffected either way: they are sent when
+	 * typed, and never poll.
+	 *
+	 * <p>A plugin key counts as a reason on its own, even with both
+	 * notifications off, because it is what a bingo participant has - and they
+	 * need to find out when an event starts.
+	 */
+	private boolean hasAnythingToPollFor()
+	{
+		return config.notifyLiveStreams()
+			|| config.notifyBroadcasts()
+			|| !config.apiKey().trim().isEmpty();
+	}
+
+	private void onPolled(BingoApiClient.PollResponse result)
+	{
+		consecutivePollFailures = 0;
+		nextPollAllowedAt = 0L;
+
+		// Applied before the degraded check below, deliberately: a site that is
+		// having trouble asks for a slower cadence, and that request is the one
+		// thing worth honouring from a degraded response - it's the whole point
+		// of the field. Everything else in one is last-known rather than
+		// current.
+		applyPollCadence(result);
+
+		// The site couldn't reach its own database and answered from a cached
+		// copy. Acting on those values could announce a stale broadcast or,
+		// worse, decide an event has ended when it hasn't. Sitting this one out
+		// costs at most one poll interval.
+		if (result.degraded)
+		{
+			log.debug("Clan site answered in degraded mode; skipping this tick");
+			return;
+		}
+
+		bingoActive = result.bingoActive;
+
+		if (bingoActive)
+		{
+			maybeRefreshMyTeam();
+			if (shouldRefreshBoard(result.boardChangedAt))
+			{
+				refreshBoard(result.boardChangedAt);
+			}
+			retryPendingSubmissions();
+		}
+
+		handleStreams(result.streams);
+		handleBroadcast(result.broadcast);
+	}
+
+	/**
+	 * Whether this tick should pull the board again.
+	 *
+	 * <p>Two gates, and both matter. Nothing changed since the copy we hold
+	 * means there is nothing to fetch at all. And if something did change but
+	 * the panel is closed, what changed is display data nobody is looking at,
+	 * so it can wait for the slow background refresh that keeps the item-id
+	 * watch list current.
+	 *
+	 * <p>Auto-submission is unaffected either way: it fires off a loot event,
+	 * not off a poll, and the watch list it uses only changes when tiles are
+	 * edited. Opening the panel gets a fresh board on the next tick.
+	 */
+	private boolean shouldRefreshBoard(String stamp)
+	{
+		if (lastBoardStamp != null && stamp != null && stamp.equals(lastBoardStamp))
+		{
+			return false;
+		}
+		// Somebody is looking at it, so it needs to be right.
+		if (isPanelVisible())
+		{
+			return true;
+		}
+		// Not on a team and not looking: there is nothing this board could be
+		// used for. The only reason to hold one with the panel closed is the
+		// item-id watch list that auto-submission checks drops against, and a
+		// member who isn't on a team cannot submit anything anyway - the server
+		// refuses it. This is the common case by a wide margin: most of the
+		// clan runs this plugin for the chat commands and the live-stream
+		// notices and is never in a bingo team at all.
+		if (myTeamId == null)
+		{
+			return false;
+		}
+		return lastBoardStamp == null
+			|| System.currentTimeMillis() - lastBoardFetchAt >= BACKGROUND_BOARD_REFRESH_MILLIS;
+	}
+
+	/**
+	 * Whether the bingo sidebar panel is actually on screen.
+	 *
+	 * <p>RuneLite removes a plugin panel from the sidebar container when a
+	 * different one is selected, so Swing's own isShowing() answers this
+	 * without depending on a RuneLite API that could move between versions.
+	 */
+	private boolean isPanelVisible()
+	{
+		return bingoPanel.isShowing();
+	}
+
+	/**
+	 * Throttled purely on elapsed time, and that is the whole point of it.
+	 *
+	 * <p>An earlier version skipped only when a team id was already known,
+	 * which meant everybody who is *not* in the bingo - most of the clan, most
+	 * of the year - re-asked on every single poll and got the same "no team"
+	 * answer forever. Exactly the wrong people paying exactly the most.
+	 */
+	private void maybeRefreshMyTeam()
+	{
+		if (lastMyTeamFetchAt != 0L
+			&& System.currentTimeMillis() - lastMyTeamFetchAt < MY_TEAM_REFRESH_MILLIS)
+		{
+			return;
+		}
+		refreshMyTeam();
+	}
+
+	private void refreshMyTeam()
+	{
+		String apiKey = config.apiKey().trim();
+		if (apiKey.isEmpty())
+		{
+			myTeamId = null;
+			return;
+		}
+		lastMyTeamFetchAt = System.currentTimeMillis();
+		api.fetchMyTeam(
+			apiKey,
+			result -> {
+				String previous = myTeamId;
+				myTeamId = result.teamId;
+				// Someone just put on a team, or moved to another one, is
+				// looking at the wrong half of the board until it is
+				// re-rendered - and the change marker cannot help, because the
+				// board itself did not change, only which part of it is theirs.
+				boolean changed = previous == null
+					? result.teamId != null
+					: !previous.equals(result.teamId);
+				if (changed)
+				{
+					forceRefreshBoard();
+					// Joining a team mid-event also changes which cadence
+					// applies, and that was decided on the poll this reply came
+					// from - before the answer existed. Clearing the last-poll
+					// time lets the next scheduled tick re-derive it, rather
+					// than leaving a new participant on the non-participant
+					// cadence until a whole slow interval has elapsed.
+					lastPollAt = 0L;
 				}
 			},
-			error -> log.debug("Failed to check bingo status: {}", error));
+			error -> log.debug("Failed to fetch team membership: {}", error));
+	}
+
+	/**
+	 * Adopts the cadence the site asks for. One number, the same for every
+	 * member of the clan - announcements are a clan feature and must not
+	 * arrive sooner for some people than others because of a bingo. Board
+	 * state is checked separately, see checkBoardState.
+	 */
+	private void applyPollCadence(BingoApiClient.PollResponse result)
+	{
+		if (result.pollSeconds > 0)
+		{
+			pollIntervalMillis = Math.min(
+				POLL_INTERVAL_MAX_MILLIS,
+				Math.max(POLL_INTERVAL_MIN_MILLIS, result.pollSeconds * 1000L));
+		}
+	}
+
+	private void onPollFailed(String error)
+	{
+		consecutivePollFailures++;
+		long delay = Math.min(
+			BACKOFF_MAX_MILLIS,
+			BACKOFF_BASE_MILLIS * (1L << Math.min(consecutivePollFailures - 1, 8)));
+		nextPollAllowedAt = System.currentTimeMillis() + delay;
+		log.debug("Clan site poll failed ({}); backing off {}ms", error, delay);
 	}
 
 	/**
@@ -446,25 +849,50 @@ public class BingoPlugin extends Plugin
 	 * own hiscores polling (see osrsclan/api/_lib/board.ts), so this only
 	 * ever has to watch for item drops.
 	 *
-	 * <p>Called directly (bypassing checkBingoStatus's gate) from
-	 * startUp/onGameStateChanged/onConfigChanged/onSubmitted - a login, a
-	 * key change, or a real submission always gets an immediate, real check
-	 * rather than waiting on the next scheduled tick.
+	 * <p>This is the expensive call - it makes the site query tiles, teams,
+	 * rosters and every submission, and send back the lot. Almost all of the
+	 * time it should be reached through {@link #poll()}, which only calls it
+	 * when the board has actually changed. {@link #forceRefreshBoard()} is
+	 * for the handful of moments where waiting for that is wrong.
+	 *
+	 * @param stamp the board marker this fetch corresponds to, recorded on
+	 *              success so later polls can tell whether anything has moved
+	 *              since. Null means "unknown", which makes the next poll
+	 *              fetch again rather than risk holding a stale board.
 	 */
-	private void refreshBoard()
+	private void refreshBoard(String stamp)
 	{
-		String apiKey = config.apiKey().trim();
-		if (apiKey.isEmpty())
+		refreshBoard(stamp, false);
+	}
+
+	private void refreshBoard(String stamp, boolean fresh)
+	{
+		if (config.apiKey().trim().isEmpty())
 		{
 			tilesByItemId.clear();
 			recentAttempts.clear();
+			lastBoardStamp = null;
 			SwingUtilities.invokeLater(bingoPanel::showNoApiKey);
 			return;
 		}
 
 		api.fetchBoard(
-			apiKey,
+			fresh,
 			board -> {
+				// The stamp the board actually came back with, not the one we
+				// asked on the strength of: a cached copy can predate the
+				// change that prompted this fetch, and recording the newer
+				// stamp for it would leave the panel stuck a change behind
+				// with nothing left to trigger a correction. Recording what
+				// arrived means it simply doesn't match the next poll either,
+				// and gets re-fetched.
+				lastBoardStamp = board.boardChangedAt != null ? board.boardChangedAt : stamp;
+				lastBoardFetchAt = System.currentTimeMillis();
+				// The board is a single cached copy shared by everyone, so it
+				// says nothing about who is asking. The team id comes from
+				// fetchMyTeam and is stitched in here, so findMyTeam() and the
+				// panel keep working exactly as before.
+				board.myTeamId = myTeamId;
 				SwingUtilities.invokeLater(() -> bingoPanel.refresh(board));
 
 				BoardResponse.Team myTeam = board.findMyTeam();
@@ -487,7 +915,30 @@ public class BingoPlugin extends Plugin
 				tilesByItemId.putAll(nextItemLookup);
 				log.debug("Bingo board refreshed: watching {} item ids", nextItemLookup.size());
 			},
-			error -> log.debug("Bingo board refresh failed: {}", error));
+			error -> {
+				// Leave the marker unknown so the next poll tries again
+				// rather than concluding the board is already up to date.
+				lastBoardStamp = null;
+				log.debug("Bingo board refresh failed: {}", error);
+			});
+	}
+
+	/**
+	 * Fetches the board right now, whatever the change marker says.
+	 *
+	 * <p>For the few moments where the marker can't answer the question:
+	 * plugin startup and an API key change (no board held at all yet), and
+	 * straight after this player's own submission (they should see their own
+	 * drop land immediately, not up to a minute later). Clearing the marker
+	 * means the following poll re-syncs it.
+	 */
+	private void forceRefreshBoard()
+	{
+		lastBoardStamp = null;
+		// fresh: these are all cases where the caller knows something changed
+		// that a cached copy may predate - most importantly this player's own
+		// submission, which they should see land immediately.
+		refreshBoard(null, true);
 	}
 
 	@Subscribe
@@ -570,14 +1021,41 @@ public class BingoPlugin extends Plugin
 		});
 	}
 
+	/**
+	 * Longest edge a proof screenshot is stored at. Only ever shrinks an
+	 * oversized frame - most clients are already at or under this, and a
+	 * proof nobody can read is worthless, so this is set well above "big
+	 * enough to read a chat line" rather than as tight as it could be.
+	 */
+	private static final int MAX_PROOF_EDGE_PX = 1920;
+
+	/**
+	 * JPEG quality for proof screenshots. High enough that the artefacts are
+	 * invisible at a glance on a game frame; the point is not to be small, it
+	 * is to not be PNG.
+	 */
+	private static final float PROOF_JPEG_QUALITY = 0.85f;
+
+	/**
+	 * Encodes the captured frame and sends it as proof.
+	 *
+	 * <p>These were lossless PNGs of a full game frame, which is close to the
+	 * worst case for PNG: it compresses flat colour well and detailed,
+	 * dithered, noisy 3D output badly, so real proofs were landing around
+	 * 800KB-1MB each. That is charged twice over - once against the site's
+	 * blob storage quota, which every proof occupies until the board is
+	 * reset, and again against its transfer quota every single time somebody
+	 * opens a tile to look at the screenshots. JPEG at high quality is
+	 * roughly three to four times smaller on this kind of image with no
+	 * meaningful loss of legibility, which is the only thing a proof has to
+	 * be.
+	 */
 	private void encodeAndUpload(BoardResponse.Tile tile, int itemId, String itemName, BufferedImage frame)
 	{
-		byte[] png;
+		byte[] image;
 		try
 		{
-			ByteArrayOutputStream out = new ByteArrayOutputStream();
-			ImageIO.write(frame, "png", out);
-			png = out.toByteArray();
+			image = encodeProof(frame);
 		}
 		catch (IOException e)
 		{
@@ -591,7 +1069,7 @@ public class BingoPlugin extends Plugin
 			config.apiKey().trim(),
 			tile.tileId,
 			itemId,
-			png,
+			image,
 			() -> onSubmitted(itemName, tile.name),
 			error -> {
 				// A transport failure is worth retrying - both immediately on
@@ -675,11 +1153,67 @@ public class BingoPlugin extends Plugin
 			});
 	}
 
+	/**
+	 * Scales the frame down if it is larger than MAX_PROOF_EDGE_PX and encodes
+	 * it as JPEG.
+	 *
+	 * <p>The intermediate is TYPE_INT_RGB rather than whatever the client
+	 * handed over: JPEG has no alpha channel, and writing an image that has
+	 * one produces either a failure or colour-inverted output depending on the
+	 * JDK, rather than anything useful.
+	 */
+	private static byte[] encodeProof(BufferedImage frame) throws IOException
+	{
+		int w = frame.getWidth();
+		int h = frame.getHeight();
+		double scale = Math.min(1.0, (double) MAX_PROOF_EDGE_PX / Math.max(w, h));
+		int outW = Math.max(1, (int) Math.round(w * scale));
+		int outH = Math.max(1, (int) Math.round(h * scale));
+
+		BufferedImage rgb = new BufferedImage(outW, outH, BufferedImage.TYPE_INT_RGB);
+		Graphics2D g = rgb.createGraphics();
+		g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+		g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
+		g.drawImage(frame, 0, 0, outW, outH, null);
+		g.dispose();
+
+		Iterator<ImageWriter> writers = ImageIO.getImageWritersByFormatName("jpeg");
+		if (!writers.hasNext())
+		{
+			// No JPEG writer on this JVM (shouldn't happen on a standard JDK).
+			// A larger PNG is much better than no proof at all.
+			ByteArrayOutputStream fallback = new ByteArrayOutputStream();
+			ImageIO.write(rgb, "png", fallback);
+			return fallback.toByteArray();
+		}
+
+		ImageWriter writer = writers.next();
+		ByteArrayOutputStream out = new ByteArrayOutputStream();
+		try (ImageOutputStream stream = ImageIO.createImageOutputStream(out))
+		{
+			writer.setOutput(stream);
+			ImageWriteParam params = writer.getDefaultWriteParam();
+			if (params.canWriteCompressed())
+			{
+				params.setCompressionMode(ImageWriteParam.MODE_EXPLICIT);
+				params.setCompressionQuality(PROOF_JPEG_QUALITY);
+			}
+			writer.write(null, new IIOImage(rgb, null, null), params);
+		}
+		finally
+		{
+			writer.dispose();
+		}
+		return out.toByteArray();
+	}
+
 	/** Common success path for a real proof landing: chat message plus a board refresh. */
 	private void onSubmitted(String itemName, String tileName)
 	{
 		notifyPlayer("Submitted " + itemName + " for tile \"" + tileName + "\"");
-		refreshBoard();
+		// Straight away, not on the next tick: a player who just got a drop
+		// should see it on their own board immediately.
+		forceRefreshBoard();
 	}
 
 	/**
@@ -922,43 +1456,40 @@ public class BingoPlugin extends Plugin
 	}
 
 	/**
-	 * Backs the "Notify me when clan members go live" toggle. The first
-	 * check after startUp/reconnect only seeds previouslyLiveUsernames
-	 * silently - otherwise everyone already live at that moment would get
-	 * announced as "newly" live just because the plugin only just started
-	 * watching.
+	 * Announces clan members who have started streaming since the last check.
+	 *
+	 * <p>Takes the list from the combined poll rather than fetching it - see
+	 * scheduledRefresh. previouslyLiveUsernames stays null until the first
+	 * result arrives so that logging in doesn't announce everyone already
+	 * live as if they had just started.
 	 */
-	private void checkLiveStreams()
+	private void handleStreams(List<BingoApiClient.LiveStream> streams)
 	{
-		if (!config.notifyLiveStreams())
+		if (streams == null || !config.notifyLiveStreams())
 		{
 			return;
 		}
 
-		api.fetchLiveStreams(
-			streams -> {
-				Set<String> nowLive = new HashSet<>();
-				for (BingoApiClient.LiveStream stream : streams)
-				{
-					nowLive.add(stream.username);
-				}
+		Set<String> nowLive = new HashSet<>();
+		for (BingoApiClient.LiveStream stream : streams)
+		{
+			nowLive.add(stream.username);
+		}
 
-				Set<String> previous = previouslyLiveUsernames;
-				previouslyLiveUsernames = nowLive;
-				if (previous == null)
-				{
-					return;
-				}
+		Set<String> previous = previouslyLiveUsernames;
+		previouslyLiveUsernames = nowLive;
+		if (previous == null)
+		{
+			return;
+		}
 
-				for (BingoApiClient.LiveStream stream : streams)
-				{
-					if (!previous.contains(stream.username))
-					{
-						sendChatMessage(stream.displayName + " just went live", config.clanMessageColor());
-					}
-				}
-			},
-			error -> log.debug("Failed to check live streams: {}", error));
+		for (BingoApiClient.LiveStream stream : streams)
+		{
+			if (!previous.contains(stream.username))
+			{
+				sendChatMessage(stream.displayName + " just went live", config.clanMessageColor());
+			}
+		}
 	}
 
 	/**
@@ -968,10 +1499,41 @@ public class BingoPlugin extends Plugin
 	 * to tell a stale-but-present sync from a fresh one, so that case isn't
 	 * covered. Runs once per session, right after login.
 	 */
+	private static final String RP_SYNC_CONFIRMED_KEY = "runeProfileSyncConfirmed";
+	private static final String RP_SYNC_CHECKED_AT_KEY = "runeProfileSyncCheckedAt";
+	private static final long RP_SYNC_RECHECK_MILLIS = 24 * 60 * 60_000L;
+
+	/**
+	 * Reminds you once, if you have never set RuneProfile up.
+	 *
+	 * <p>This fired on every login, for every install, and the endpoint it
+	 * calls is the most expensive one on the site - a clan roster lookup plus
+	 * three upstream profile fetches - all to answer a question whose answer
+	 * almost never changes and, once it is yes, never changes again. With a few
+	 * hundred installs that is hundreds of the site's heaviest requests a day
+	 * to tell nobody anything.
+	 *
+	 * <p>So the answer is remembered. Confirmed synced, and it never asks
+	 * again. Not synced, and it asks at most once a day rather than once a
+	 * session, which is if anything a better reminder - once per session
+	 * punishes people who hop worlds or crash.
+	 */
 	private void checkRuneProfileSync()
 	{
 		if (!config.remindRuneProfileSync() || checkedRuneProfileSync)
 		{
+			return;
+		}
+		if ("true".equals(configManager.getConfiguration(BingoConfig.GROUP, RP_SYNC_CONFIRMED_KEY)))
+		{
+			checkedRuneProfileSync = true;
+			return;
+		}
+		Long lastCheck = configManager.getConfiguration(
+			BingoConfig.GROUP, RP_SYNC_CHECKED_AT_KEY, Long.class);
+		if (lastCheck != null && System.currentTimeMillis() - lastCheck < RP_SYNC_RECHECK_MILLIS)
+		{
+			checkedRuneProfileSync = true;
 			return;
 		}
 		Player local = client.getLocalPlayer();
@@ -981,8 +1543,11 @@ public class BingoPlugin extends Plugin
 		}
 
 		checkedRuneProfileSync = true;
+		configManager.setConfiguration(
+			BingoConfig.GROUP, RP_SYNC_CHECKED_AT_KEY, System.currentTimeMillis());
 		api.lookupRank(local.getName(),
-			result -> {},
+			result -> configManager.setConfiguration(
+				BingoConfig.GROUP, RP_SYNC_CONFIRMED_KEY, "true"),
 			(error, reason) -> {
 				if ("not-on-runeprofile".equals(reason))
 				{
@@ -995,35 +1560,50 @@ public class BingoPlugin extends Plugin
 	private static final String LAST_SEEN_BROADCAST_KEY = "lastSeenBroadcast";
 
 	/**
-	 * Backs the "Clan broadcasts" toggle: shows the latest one-off message an
-	 * admin has pushed out from the site's Board Config panel, once per
-	 * message. The last-shown timestamp is persisted via ConfigManager
-	 * (rather than kept in memory like checkedRuneProfileSync above) since a
-	 * broadcast can happen at any point during play, not just once per
-	 * session - an in-memory flag would re-show the same message after every
-	 * client restart.
+	 * Shows the latest one-off message an admin has pushed out from the
+	 * site's Board Config panel, once per message.
+	 *
+	 * <p>Takes the broadcast from the combined poll rather than fetching it -
+	 * see scheduledRefresh. The last-shown timestamp is persisted via
+	 * ConfigManager (rather than kept in memory like checkedRuneProfileSync)
+	 * since a broadcast can happen at any point during play, not just once
+	 * per session - an in-memory flag would re-show the same message after
+	 * every client restart.
 	 */
-	private void checkBroadcast()
+	private void handleBroadcast(BingoApiClient.Broadcast broadcast)
 	{
-		if (!config.notifyBroadcasts())
+		if (broadcast == null
+			|| broadcast.message == null
+			|| broadcast.message.isEmpty()
+			|| broadcast.updatedAt == null)
 		{
 			return;
 		}
 
-		api.fetchBroadcast(
-			result -> {
-				if (result.message == null || result.message.isEmpty() || result.updatedAt == null)
-				{
-					return;
-				}
-				String lastSeen = configManager.getConfiguration(BingoConfig.GROUP, LAST_SEEN_BROADCAST_KEY);
-				if (result.updatedAt.equals(lastSeen))
-				{
-					return;
-				}
-				configManager.setConfiguration(BingoConfig.GROUP, LAST_SEEN_BROADCAST_KEY, result.updatedAt);
-				sendChatMessage(result.message, config.clanMessageColor());
-			},
-			error -> log.debug("Failed to check broadcast: {}", error));
+		String lastSeen = configManager.getConfiguration(BingoConfig.GROUP, LAST_SEEN_BROADCAST_KEY);
+		if (broadcast.updatedAt.equals(lastSeen))
+		{
+			return;
+		}
+
+		// The endpoint always returns the *current* message, not just unseen
+		// ones, so "haven't seen this timestamp before" is not on its own
+		// enough to mean "this is news". On a brand new install there is no
+		// stored timestamp at all, which used to make whatever broadcast
+		// happened to be current - possibly weeks old - get announced as if
+		// it had just been sent. The first observation only records where we
+		// came in; anything after it is genuinely new.
+		boolean firstObservation = lastSeen == null;
+		configManager.setConfiguration(BingoConfig.GROUP, LAST_SEEN_BROADCAST_KEY, broadcast.updatedAt);
+
+		// Tracked even while the toggle is off, and only *displayed* when it
+		// is on. Skipping the bookkeeping instead would mean turning the
+		// toggle back on later replays whatever stale message was current
+		// when it was turned off - the same bug in a different disguise.
+		if (firstObservation || !config.notifyBroadcasts())
+		{
+			return;
+		}
+		sendChatMessage(broadcast.message, config.clanMessageColor());
 	}
 }

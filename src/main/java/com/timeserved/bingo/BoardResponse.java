@@ -16,6 +16,15 @@ import java.util.List;
 public class BoardResponse
 {
 	public String myTeamId;
+
+	/**
+	 * The change marker this board render corresponds to - echoed back by the
+	 * site so the plugin can record what it actually received rather than what
+	 * it expected. See BingoPlugin#refreshBoard: filing a cached, slightly
+	 * older board under the newer stamp the poll reported would leave it stuck
+	 * one change behind with nothing to trigger a correction.
+	 */
+	public String boardChangedAt;
 	public Config config;
 	public List<Team> teams;
 
@@ -44,7 +53,7 @@ public class BoardResponse
 	/**
 	 * The bingo event's own name/size - used for the sidebar panel's header.
 	 * The "is bingo active" flag lives on a separate, dedicated endpoint
-	 * (see BingoApiClient#fetchBingoStatus) rather than here, since that
+	 * (see BingoApiClient#fetchPluginPoll) rather than here, since that
 	 * needs to be cheap enough to poll every minute regardless of activity,
 	 * unlike this response.
 	 */
