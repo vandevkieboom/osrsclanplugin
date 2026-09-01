@@ -9,6 +9,132 @@ the clan site at `https://timeserved.vercel.app` (companion repo: `osrsclan`,
 same parent folder) via `BingoApiClient`, authenticated with a plugin key
 pasted into config (`BingoConfig.apiKey()`).
 
+## Request volume: one poll per tick, only while logged in
+
+This plugin was, by a wide margin, the largest source of load on the clan
+site, and in late August 2026 it took the site down. Not through any bug -
+just by doing something small far too often, from far too many clients, at
+a scale the free hosting tier could not absorb. The full incident write-up
+lives in `osrsclan/CLAUDE.md`; what matters here is the plugin's half.
+
+**What it was doing.** Every scheduled tick fired three separate requests -
+bingo status, clan broadcast, live streams - unconditionally, for as long as
+the client process was running. Logged in or sitting at the login screen made
+no difference. That is roughly 4,300 requests per member per day for a plugin
+doing nothing at all, and on top of that, whenever a bingo event was on, a
+fourth request re-downloaded the entire board (tiles, teams, rosters, every
+submission) once a minute whether or not one single thing on it had changed.
+
+**What it does now** (`BingoPlugin#poll`):
+
+- **One request per tick**, `BingoApiClient#fetchPluginPoll` ->
+  `GET /api/plugin-poll`, carrying all three answers. They were always
+  fetched on the same tick anyway, so nothing arrives any later than before.
+- **The site sets the cadence**, via `pollSeconds` on that response
+  (clamped here to 1-15 minutes). One minute while a bingo event is running,
+  because that is when the board is what members are actually watching;
+  slower between events, when the only things this carries are "someone went
+  live" and the occasional admin broadcast and nobody can tell 60 seconds
+  from 180. It lives server-side so it can also be retuned mid-month without
+  a plugin release - hosting quotas are monthly and hard, and going over
+  takes the site down for everyone until the month rolls over, which is not
+  something a constant compiled into installs that update whenever they feel
+  like it can be relied on to fix in time.
+- **Nothing while logged out.** Every one of these results is delivered as a
+  game chat message or an in-game board, so polling at the login screen was
+  spending requests on notifications with nowhere to go.
+- **The board is only re-fetched when it has actually changed.** The poll
+  response carries `boardChangedAt`, an opaque marker the site moves whenever
+  anything the board is built from changes. The plugin compares it against
+  the value its current board was fetched with. A real change is still picked
+  up on the very next tick; what's gone is re-downloading an identical board
+  every minute for hours.
+- **Backoff on failure**, doubling to a 15-minute cap. Without it, a site
+  outage turns every online plugin into a client retrying once a minute
+  forever, which is maximum load at the moment the site can least afford it -
+  and that is exactly how a database problem became a total outage.
+- **Sits still on a `degraded` response.** When the site can't reach its own
+  database it answers 200 with last-known values and `degraded: true` rather
+  than erroring (an error response can't be CDN-cached, so an erroring
+  endpoint multiplies its own load). Acting on those values could announce a
+  stale broadcast or conclude an event has ended when it hasn't, so the
+  plugin skips the tick instead. Costs at most a minute.
+
+**Bingo work is gated on actually being in a bingo, not on one existing.**
+Most of the clan runs this plugin for the chat commands and the notifications
+and is never in a bingo team. For them the plugin does no bingo work at all,
+even mid-event:
+
+- The board is never fetched while `myTeamId` is null and the panel is shut.
+  There is nothing it could be used for - the only reason to hold a board with
+  the panel closed is the item-id watch list for auto-submission, and the
+  server refuses submissions from a member with no team anyway.
+- The poll cadence stays slow. The site sends two (`pollSeconds` and
+  `participantPollSeconds`) and the plugin picks; the fast one applies only
+  while genuinely on a team. An event a member is not in changes nothing they
+  can see, so speeding up their poll for its duration would spend most of the
+  event's budget on people who cannot tell the difference.
+- `maybeRefreshMyTeam` throttles on elapsed time, not on whether a team was
+  found. An earlier version skipped only when a team id was already known,
+  which had everybody *not* in the bingo re-asking on every single poll and
+  getting the same "no team" answer forever - exactly the wrong people paying
+  the most.
+
+`hasAnythingToPollFor()` goes one step further: with both notification toggles
+off and no plugin key, there is nothing the periodic poll could deliver, so it
+doesn't run at all. Chat commands are unaffected - they are sent when typed
+and never poll.
+
+**The RuneProfile sync reminder remembers its answer.** It used to fire on
+every login, for every install, calling the most expensive endpoint on the
+site (a clan roster lookup plus three upstream profile fetches) to answer a
+question that once answered yes never changes again. Now: confirmed synced,
+never asks again; not synced, asks at most once a day rather than once a
+session.
+
+**The board fetch is anonymous and shared.** `fetchBoard` sends no key and
+asks for `?view=plugin`. The site serves one cached copy of that response to
+everybody, which is what stops a single person's drop costing one full board
+render per online member; `view=plugin` strips the per-proof blob and avatar
+URLs BoardResponse was already discarding, which is most of the payload once
+an event has real submissions on it. Don't add an Authorization header to it -
+that asks for a private copy of a public answer. Which team is *yours* comes
+from `fetchMyTeam` instead: once on startup, on a key change, and at most
+every half hour, since team assignment happens before an event rather than
+during one.
+
+**The board is only re-fetched when someone is looking.** Nearly everything
+that changes minute-to-minute during an event is display data - standings,
+teammates' submissions, goal totals. The one thing the plugin needs while
+nobody has the panel open is the item-id watch list, and that only changes
+when an admin edits tiles. So: panel open, refresh on every change; panel
+closed, refresh every ten minutes. Auto-submission is unaffected either way -
+it fires off a loot event, not off a poll.
+
+**Proofs are JPEG, not PNG.** A lossless PNG of a full game frame is close to
+PNG's worst case and real proofs were landing near a megabyte each, charged
+against the site's storage quota for as long as the board lives and against
+its transfer quota every time anyone opens a tile to look. High-quality JPEG
+is several times smaller with no loss of the only property a proof needs,
+which is being readable. `contentTypeOf` sniffs PNG magic bytes so a proof
+queued on disk by an older build and retried after an update is still
+declared correctly.
+
+**During an event the tick is still one minute, deliberately.** The goal was
+never to make members wait longer for a board update, a rank or a broadcast -
+a plugin showing stale data has no reason to exist. The goal was to stop
+paying for the same answers over and over, and to spend the budget that
+remains on the moments people are actually looking. If load needs cutting
+further, merge or de-duplicate more requests, and raise the *idle* cadence,
+before touching the during-an-event one.
+
+**Don't** add a plugin key, a player name, or anything else per-member to
+`fetchPluginPoll`. It is anonymous and byte-identical for every caller
+specifically so that a single CDN cache entry can serve the whole clan;
+making it per-member is the same as having no cache at all. Anything that
+genuinely needs to be per-member belongs on `fetchBoard`, which is
+authenticated and rare.
+
 ## Goal-progress tracking (XP/KC tiles) - reworked to hiscores-only
 
 The plugin used to parse kill-count chat lines and push its own skill-XP
@@ -45,6 +171,11 @@ too, so there's no longer any path for a plugin (buggy or malicious) to
 write an arbitrary progress value directly.
 
 ## Backing off board polling when no bingo event is running
+
+> **Partly superseded** - the `bingo_active` gate described below still
+> exists and still works, but the "cheap ping" is no longer its own request:
+> it is one field on the combined poll above, which also now says whether the
+> board has changed at all. See "Request volume" above.
 
 This plugin is a general clan tool, not bingo-only - most members keep it
 running for `!verify`/`!needed`/`!live`, clan broadcasts, and live-stream

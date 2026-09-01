@@ -51,7 +51,24 @@ public class BingoApiClient
 	 * param instead (see submitPluginProof in api/board.ts).
 	 */
 	private static final MediaType OCTET_STREAM = MediaType.parse("application/octet-stream");
-	private static final String SCREENSHOT_CONTENT_TYPE = "image/png";
+	private static final String SCREENSHOT_CONTENT_TYPE = "image/jpeg";
+	private static final String LEGACY_SCREENSHOT_CONTENT_TYPE = "image/png";
+
+	/**
+	 * Proofs are JPEG now (see BingoPlugin#encodeProof), but the on-disk retry
+	 * queue can still hold PNG bytes saved by an earlier version of the plugin
+	 * and never successfully sent. Declaring those as JPEG would store a blob
+	 * whose content type doesn't match its bytes, which browsers may then
+	 * refuse to render - a silently unviewable proof. Sniffing the PNG magic
+	 * number costs nothing and keeps those retries correct.
+	 */
+	private static String contentTypeOf(byte[] image)
+	{
+		boolean isPng = image.length >= 8
+			&& (image[0] & 0xFF) == 0x89
+			&& image[1] == 'P' && image[2] == 'N' && image[3] == 'G';
+		return isPng ? LEGACY_SCREENSHOT_CONTENT_TYPE : SCREENSHOT_CONTENT_TYPE;
+	}
 
 	private final OkHttpClient httpClient;
 	private final Gson gson;
@@ -64,24 +81,44 @@ public class BingoApiClient
 	}
 
 	/**
-	 * Fetches the board, including every tile's item ids and the caller's own
-	 * team. The key is optional for reading, but without it the response has no
-	 * myTeamId and the plugin can't tell which tiles are relevant.
+	 * Fetches the board: every team's tiles, item ids, progress and
+	 * submissions.
+	 *
+	 * <p>Sent with no key, deliberately. This response is identical for every
+	 * member and the site serves one cached copy of it to all of them, which
+	 * is what stops a single person's drop costing one full board render per
+	 * online member during an event. Adding an Authorization header here would
+	 * be asking for a private copy of a public answer.
+	 *
+	 * <p>It therefore does not say which team is yours - {@link #fetchMyTeam}
+	 * answers that separately, and rarely. See BingoPlugin#myTeamId.
 	 */
-	public void fetchBoard(String apiKey, Consumer<BoardResponse> onSuccess, Consumer<String> onError)
+	public void fetchBoard(boolean fresh, Consumer<BoardResponse> onSuccess, Consumer<String> onError)
 	{
-		HttpUrl url = HttpUrl.parse(BASE_URL + "/api/board");
-		if (url == null)
+		HttpUrl base = HttpUrl.parse(BASE_URL + "/api/board");
+		if (base == null)
 		{
 			onError.accept("Invalid API base URL");
 			return;
 		}
 
-		Request.Builder request = new Request.Builder().url(url).get();
-		if (!apiKey.isEmpty())
+		// view=plugin asks for the board with everything BoardResponse does
+		// not read already stripped out - per-proof blob and avatar URLs above
+		// all, which are most of the payload once an event has real
+		// submissions on it and which this plugin was downloading and throwing
+		// away on every refresh.
+		HttpUrl.Builder builder = base.newBuilder().addQueryParameter("view", "plugin");
+		if (fresh)
 		{
-			request.header("Authorization", "Bearer " + apiKey);
+			// The site caches this response briefly so that one change does not
+			// cost one render per online member. That is right for a routine
+			// refresh and wrong right after *this* player submitted something:
+			// their own drop missing from their own board reads as a bug. A
+			// unique query string gets an uncached answer for the handful of
+			// refreshes that follow a real action.
+			builder.addQueryParameter("fresh", Long.toString(System.currentTimeMillis()));
 		}
+		Request.Builder request = new Request.Builder().url(builder.build()).get();
 
 		httpClient.newCall(request.build()).enqueue(new Callback()
 		{
@@ -114,38 +151,43 @@ public class BingoApiClient
 		});
 	}
 
-	/** Just the "is a bingo event running" flag - see BingoStatus for why this is separate from fetchBoard. */
-	public static class BingoStatus
+	/** Which team the plugin key's owner is on - mirrors GET /api/board?resource=my-team. */
+	public static class MyTeam
 	{
-		public boolean bingoActive;
+		/** Null when the key's owner hasn't been put on a team yet. */
+		public String teamId;
 	}
 
 	/**
-	 * A deliberately tiny, unauthenticated, edge-cached check - cheap enough
-	 * to poll every minute regardless of whether bingo is even active,
-	 * unlike fetchBoard (which queries tiles/teams/submissions per request
-	 * and can't be blanket-cached since its response is personalized per
-	 * caller). This is what lets the plugin notice a re-activated event
-	 * within about a minute instead of needing a slow, infrequent full
-	 * board check to catch it.
+	 * Asks which team this plugin key belongs to.
+	 *
+	 * <p>The one genuinely per-member thing the board response used to carry,
+	 * split out so the board itself can be one cached copy shared by everyone.
+	 * Tiny, and asked for rarely - on startup, on a key change, and at most
+	 * every half hour after that.
 	 */
-	public void fetchBingoStatus(Consumer<BingoStatus> onSuccess, Consumer<String> onError)
+	public void fetchMyTeam(String apiKey, Consumer<MyTeam> onSuccess, Consumer<String> onError)
 	{
-		HttpUrl url = HttpUrl.parse(BASE_URL + "/api/board?resource=status");
-		if (url == null)
+		HttpUrl base = HttpUrl.parse(BASE_URL + "/api/board");
+		if (base == null || apiKey.isEmpty())
 		{
 			onError.accept("Invalid API base URL");
 			return;
 		}
 
-		Request request = new Request.Builder().url(url).get().build();
+		HttpUrl url = base.newBuilder().addQueryParameter("resource", "my-team").build();
+		Request request = new Request.Builder()
+			.url(url)
+			.header("Authorization", "Bearer " + apiKey)
+			.get()
+			.build();
 
 		httpClient.newCall(request).enqueue(new Callback()
 		{
 			@Override
 			public void onFailure(Call call, IOException e)
 			{
-				log.debug("Failed to fetch bingo status", e);
+				log.debug("Failed to fetch team membership", e);
 				onError.accept("Could not reach the clan site");
 			}
 
@@ -160,11 +202,202 @@ public class BingoApiClient
 						onError.accept(describeFailure(closeable, parseErrorBody(body)));
 						return;
 					}
-					onSuccess.accept(gson.fromJson(body.charStream(), BingoStatus.class));
+					MyTeam parsed = gson.fromJson(body.charStream(), MyTeam.class);
+					onSuccess.accept(parsed == null ? new MyTeam() : parsed);
 				}
 				catch (JsonSyntaxException e)
 				{
-					log.debug("Malformed bingo status response", e);
+					log.debug("Malformed team membership response", e);
+					onError.accept("The clan site returned an unexpected response");
+				}
+			}
+		});
+	}
+
+	/**
+	 * Everything the plugin's once-a-minute tick needs, in one response.
+	 *
+	 * <p>This used to be three separate requests fired on the same tick -
+	 * bingo status, clan broadcast, and live streams - which is three
+	 * requests per minute per online member, forever, or roughly 4,300 per
+	 * member per day before anyone does anything at all. Across a clan this
+	 * size that was the single biggest source of load on the site by a wide
+	 * margin, and it exhausted the hosting plan's quotas. Merging them costs
+	 * nothing in freshness (they were always fetched together anyway) and
+	 * removes two thirds of the plugin's total request volume outright.
+	 *
+	 * <p>Deliberately unauthenticated and identical for every caller, so the
+	 * site can serve nearly all of these from its CDN without running any
+	 * server code or touching its database at all. Don't add a key, a player
+	 * name, or anything else per-member to this call - that would give every
+	 * member their own cache entry, which is the same as having no cache.
+	 */
+	public void fetchPluginPoll(Consumer<PollResponse> onSuccess, Consumer<String> onError)
+	{
+		HttpUrl url = HttpUrl.parse(BASE_URL + "/api/plugin-poll");
+		if (url == null)
+		{
+			onError.accept("Invalid API base URL");
+			return;
+		}
+
+		Request request = new Request.Builder().url(url).get().build();
+
+		httpClient.newCall(request).enqueue(new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException e)
+			{
+				log.debug("Failed to poll the clan site", e);
+				onError.accept("Could not reach the clan site");
+			}
+
+			@Override
+			public void onResponse(Call call, Response response)
+			{
+				try (Response closeable = response)
+				{
+					ResponseBody body = closeable.body();
+					if (!closeable.isSuccessful() || body == null)
+					{
+						onError.accept(describeFailure(closeable, parseErrorBody(body)));
+						return;
+					}
+					PollResponse parsed = gson.fromJson(body.charStream(), PollResponse.class);
+					if (parsed == null)
+					{
+						onError.accept("The clan site returned an empty response");
+						return;
+					}
+					onSuccess.accept(parsed);
+				}
+				catch (JsonSyntaxException e)
+				{
+					log.debug("Malformed poll response", e);
+					onError.accept("The clan site returned an unexpected response");
+				}
+			}
+		});
+	}
+
+	/** One combined tick's worth of state - mirrors GET /api/plugin-poll. */
+	public static class PollResponse
+	{
+		/** Whether a bingo event is currently running. */
+		public boolean bingoActive;
+
+		/**
+		 * How many seconds to wait before polling again. The same value for
+		 * every member of the clan - see BingoPlugin#applyPollCadence for why
+		 * that is deliberate: this carries clan-wide announcements, which must
+		 * not arrive sooner for some members than others.
+		 *
+		 * <p>Set server-side rather than fixed in the plugin so it can be
+		 * changed without a release - hosting quotas are monthly and hard, and
+		 * plugin installs update whenever they feel like it. 0 or missing
+		 * means "use the default". Callers must clamp it - see
+		 * BingoPlugin#pollIntervalMillis.
+		 */
+		public int pollSeconds;
+
+		/**
+		 * Opaque marker that changes whenever anything on the board changes.
+		 * Compare it against the value the board was last fetched with; only
+		 * fetch the board again when it differs. Never parse it - its format
+		 * is the server's business and may change.
+		 */
+		public String boardChangedAt;
+
+		/** The current admin broadcast, or null when none has ever been sent. */
+		public Broadcast broadcast;
+
+		/** Clan members streaming right now - never null in practice, but check anyway. */
+		public List<LiveStream> streams;
+
+		/**
+		 * True when the site answered from a cached copy because its database
+		 * was unreachable. The values above are then last-known rather than
+		 * current, so callers should sit still rather than act on a change
+		 * they can't trust.
+		 */
+		public boolean degraded;
+	}
+
+	/** The current admin broadcast - mirrors the `broadcast` object in GET /api/plugin-poll. */
+	public static class Broadcast
+	{
+		public String message;
+
+		/** ISO-8601 timestamp, used to tell a new broadcast from one already shown. */
+		public String updatedAt;
+	}
+
+	/** Just the board's change marker - mirrors GET /api/board?resource=status. */
+	public static class BoardState
+	{
+		public boolean bingoActive;
+
+		/** Opaque; compare against the value the board was last fetched with. */
+		public String boardChangedAt;
+	}
+
+	/**
+	 * Asks only whether the board has changed.
+	 *
+	 * <p>Deliberately separate from {@link #fetchPluginPoll}. Board state is the
+	 * one thing that needs to be checked often, and only by the handful of
+	 * members actually competing; clan announcements need to reach everybody at
+	 * the same speed. Carrying both on one request meant the announcement rate
+	 * was set by whoever needed the board most, so members in a bingo team
+	 * heard about a stream going live sooner than everyone else - a clan-wide
+	 * feature behaving differently based on something completely unrelated to
+	 * it.
+	 *
+	 * <p>Tiny and unauthenticated, so the whole clan shares one cached copy.
+	 */
+	public void fetchBoardState(Consumer<BoardState> onSuccess, Consumer<String> onError)
+	{
+		HttpUrl base = HttpUrl.parse(BASE_URL + "/api/board");
+		if (base == null)
+		{
+			onError.accept("Invalid API base URL");
+			return;
+		}
+
+		HttpUrl url = base.newBuilder().addQueryParameter("resource", "status").build();
+		Request request = new Request.Builder().url(url).get().build();
+
+		httpClient.newCall(request).enqueue(new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException e)
+			{
+				log.debug("Failed to check board state", e);
+				onError.accept("Could not reach the clan site");
+			}
+
+			@Override
+			public void onResponse(Call call, Response response)
+			{
+				try (Response closeable = response)
+				{
+					ResponseBody body = closeable.body();
+					if (!closeable.isSuccessful() || body == null)
+					{
+						onError.accept(describeFailure(closeable, parseErrorBody(body)));
+						return;
+					}
+					BoardState parsed = gson.fromJson(body.charStream(), BoardState.class);
+					if (parsed == null)
+					{
+						onError.accept("The clan site returned an empty response");
+						return;
+					}
+					onSuccess.accept(parsed);
+				}
+				catch (JsonSyntaxException e)
+				{
+					log.debug("Malformed board state response", e);
 					onError.accept("The clan site returned an unexpected response");
 				}
 			}
@@ -195,7 +428,7 @@ public class BingoApiClient
 			.addQueryParameter("resource", "plugin-proof")
 			.addQueryParameter("tileId", tileId)
 			.addQueryParameter("itemId", Integer.toString(itemId))
-			.addQueryParameter("contentType", SCREENSHOT_CONTENT_TYPE)
+			.addQueryParameter("contentType", contentTypeOf(screenshot))
 			.build();
 
 		Request request = new Request.Builder()
@@ -453,65 +686,6 @@ public class BingoApiClient
 				catch (JsonSyntaxException e)
 				{
 					log.debug("Malformed live streams response", e);
-					onError.accept("The clan site returned an unexpected response");
-				}
-			}
-		});
-	}
-
-	/** Result of a {@link #fetchBroadcast} call - mirrors GET /api/runeprofile-proxy?resource=broadcast. */
-	public static class BroadcastResult
-	{
-		public String message;
-
-		/** ISO-8601 timestamp of the last admin broadcast, or null if none has ever been sent. */
-		public String updatedAt;
-	}
-
-	/**
-	 * The latest one-off message an admin has pushed out from the site's
-	 * Board Config panel. Callers compare updatedAt against the last one
-	 * they've already shown to tell a new broadcast from one already seen -
-	 * this always returns the current message, not just new ones. Public,
-	 * no plugin key: same reasoning as lookupRank above.
-	 */
-	public void fetchBroadcast(Consumer<BroadcastResult> onSuccess, Consumer<String> onError)
-	{
-		HttpUrl base = HttpUrl.parse(BASE_URL + "/api/runeprofile-proxy");
-		if (base == null)
-		{
-			onError.accept("Invalid API base URL");
-			return;
-		}
-
-		HttpUrl url = base.newBuilder().addQueryParameter("resource", "broadcast").build();
-		Request request = new Request.Builder().url(url).get().build();
-
-		httpClient.newCall(request).enqueue(new Callback()
-		{
-			@Override
-			public void onFailure(Call call, IOException e)
-			{
-				log.debug("Failed to fetch broadcast", e);
-				onError.accept("Could not reach the clan site");
-			}
-
-			@Override
-			public void onResponse(Call call, Response response)
-			{
-				try (Response closeable = response)
-				{
-					ResponseBody body = closeable.body();
-					if (!closeable.isSuccessful() || body == null)
-					{
-						onError.accept(describeFailure(closeable, parseErrorBody(body)));
-						return;
-					}
-					onSuccess.accept(gson.fromJson(body.charStream(), BroadcastResult.class));
-				}
-				catch (JsonSyntaxException e)
-				{
-					log.debug("Malformed broadcast response", e);
 					onError.accept("The clan site returned an unexpected response");
 				}
 			}
