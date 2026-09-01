@@ -10,7 +10,7 @@ clan site automatically, so nobody has to take and upload screenshots by hand.
 
 - **Automatic bingo proof submission** - screenshots and uploads proof the
   moment a matching drop lands, with a disk-persisted retry queue if the site
-  is unreachable.
+  is unreachable so a dropped connection doesn't lose your proof.
 - **`!rank [name]`** - reports which clan rank tier a member (or the sender,
   if no name is given) is eligible for, based on their synced RuneProfile
   data. Same check as the site's "Auto-Verify" button.
@@ -20,15 +20,36 @@ clan site automatically, so nobody has to take and upload screenshots by hand.
 - **`!needed [name]`** - what's missing for the next rank tier up.
 - **`!live`** - which clan members are currently streaming on Twitch.
 - **Live-stream and broadcast notifications** - optional chat messages when
-  a clan member goes live, or an admin posts a broadcast from the site.
+  a clan member goes live, or an admin posts a broadcast from the site. Both
+  can be toggled independently; if you're not interested in either and don't
+  have a plugin key set, the plugin makes no background requests at all.
 - **Sidebar panel** - your team's board, goal-tile progress, and a clan
-  leaderboard.
+  leaderboard, with collapsible sections. Can be hidden entirely (nav icon
+  and all) via the **"Show bingo board"** toggle.
 - **On-screen codeword overlay** - an optional, draggable overlay showing an
   admin-announced verification codeword (and, if enabled, a live timestamp),
-  so it ends up baked into any proof screenshot taken while it's on screen.
+  matching the Wise Old Man plugin's overlay style. It has to actually be on
+  screen at the moment you take/receive a proof to end up baked into that
+  screenshot - it's a normal overlay, not a hidden watermark.
+- **Bingo submit notifications** - an optional chat message confirming a
+  proof went through (or failed), and an optional "crab dance" emote played
+  on a successful bingo drop.
+- **RuneProfile sync reminder** - a one-time-per-day nudge (not once per
+  login) if your RuneProfile isn't synced yet, since several commands and
+  bingo verification depend on it.
 
 All chat commands can be turned off entirely with the **"Clan chat commands"**
-config toggle.
+config toggle. Notification message colors (broadcasts/live-stream, and bingo
+submissions separately) are configurable too.
+
+## Kill-count and skill-XP tiles need no action from you
+
+Item-drop tiles are the only kind you interact with directly. Team-combined
+boss KC and skill-XP tiles are tracked entirely by the clan site itself, from
+your synced RuneProfile hiscores - the plugin doesn't read or report your
+live KC/XP at all. As long as your RuneProfile is synced, your progress on
+those tiles is picked up automatically; the board just displays the number
+the site has already computed.
 
 ## What it sends, and when
 

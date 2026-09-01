@@ -1,8 +1,8 @@
 # Time Served plugin - context for continuing this work
 
 RuneLite plugin for the Time Served OSRS clan. Auto-submits bingo tile proofs
-(screenshot on a matching drop) and has `!verify`/`!needed`/`!live` chat
-commands. Team-combined skill XP / boss KC tiles are display-only here - the
+(screenshot on a matching drop) and has `!rank`/`!verify`/`!needed`/`!live`
+chat commands. Team-combined skill XP / boss KC tiles are display-only here - the
 plugin reports nothing for them; their progress is tracked entirely
 server-side from WOM hiscores (see "Goal-progress tracking" below). Talks to
 the clan site at `https://timeserved.vercel.app` (companion repo: `osrsclan`,
@@ -280,15 +280,19 @@ mode scoring system, and Anvil's device-code Discord sign-in flow (the
 existing pasted-plugin-key model is intentionally simpler and considered
 sufficient for this clan's size).
 
-## On-screen codeword overlay (`BingoCodewordOverlay`, new file)
+## On-screen codeword overlay (`BingoCodewordOverlay`)
 
-A second, separate overlay from `BingoVerificationOverlay` - that one only
-ever renders for the single frame `drawManager` captures (baked into proof
-screenshots, never actually visible during play). This one is the opposite:
-a persistent, player-draggable/resizable overlay showing the same codeword
-+ live UTC timestamp, on screen the whole session. Gated independently by
-`BingoConfig.showLiveCodewordOverlay()` (default off) - both overlays can be
-on at once, or either alone.
+Originally built as a second overlay alongside `BingoVerificationOverlay` -
+that one only ever rendered for the single frame `drawManager` captures
+(baked into proof screenshots, never actually visible during play), while
+this one is the opposite: a persistent, player-draggable/resizable overlay
+showing the codeword + live UTC timestamp, on screen the whole session.
+`BingoVerificationOverlay` has since been removed, so `BingoCodewordOverlay`
+is now the only one - gated by `BingoConfig.showLiveCodewordOverlay()`
+(default off). Since it's the only mechanism left, if a member wants the
+codeword baked into a proof screenshot, this overlay needs to actually be
+enabled and visible at capture time - there is no longer a
+capture-only/invisible-during-play path.
 
 The ask was to match the Wise Old Man RuneLite plugin's on-screen overlay
 "exactly." Four rounds were spent guessing the styling/behavior from
@@ -357,15 +361,16 @@ custom-paint versions (rounded rect, manual token wrapping, font-shrinking)
 are gone; don't reintroduce that approach without a concrete reason WOM's
 own component-based approach doesn't work here.
 
-`BingoVerificationOverlay`'s burn-in colors are intentionally left as
-hardcoded `Color.WHITE`/`Color.LIGHT_GRAY` - wasn't asked to change that
-one, so left alone.
+(`BingoVerificationOverlay`'s hardcoded `Color.WHITE`/`Color.LIGHT_GRAY`
+burn-in colors, mentioned in earlier notes here, are moot - that class no
+longer exists.)
 
-Not yet manually tested in a running client (compiles clean via
-`./gradlew compileJava` - see "What to actually test" below to add: set a
-codeword, enable the new toggle, confirm it renders, drag it wide (one
-line, codeword left/timestamp right) and narrow (wraps into extra lines),
-restart the client and confirm position/size/enabled state all persisted).
+Manually verified in a running client: broadcast delivery was confirmed
+working end-to-end on 2026-09-01 (see "History" above). Still worth
+confirming specifically for this overlay - set a codeword, enable the
+toggle, confirm it renders, drag it wide (one line, codeword left/timestamp
+right) and narrow (wraps into extra lines), restart the client and confirm
+position/size/enabled state all persisted (see the checklist below).
 
 ## Scope / design philosophy
 
@@ -377,16 +382,26 @@ That's a considered decision (see the Anvil section above), not a
 temporary starting point - don't propose expanding tile types as a
 "quick win" without checking first.
 
-## Current branch: `improvement/bingo-tracking`
+## History: the `improvement/bingo-tracking` branch
 
-This branch is not merged to `main` yet - it's out for review as
-[PR #1](https://github.com/vandevkieboom/osrsclanplugin/pull/1). Most of it
-was originally built/reviewed without a JDK available (no compiler access in
-that environment). **It has since actually been compiled and run** on a
-desktop with a working JDK, and real bugs were found and fixed as a result
-- see "Bugs found from real client testing" below. Keep testing incrementally
-as more gets added; don't assume something's correct just because it was
-carefully reasoned through without a compiler.
+Most of the goal-tracking rework, the disk-persisted retry queue, and the
+verification-codeword work below was built on a branch called
+`improvement/bingo-tracking`, merged to `main` in two PRs:
+[PR #1](https://github.com/vandevkieboom/osrsclanplugin/pull/1) (disk-persisted
+retry queue + manual verification code) and, later,
+[PR #5](https://github.com/vandevkieboom/osrsclanplugin/pull/5) (the
+request-volume cut described above, merged 2026-09-01). Everything described
+in this file now lives on `main` - there is no separate feature branch to
+track anymore. Much of it was originally built/reviewed without a JDK
+available (no compiler access in that environment); it has since actually
+been compiled and run on a desktop with a working JDK, and real bugs were
+found and fixed as a result - see "Bugs found from real client testing"
+below. **That pattern repeated as recently as 2026-09-01**: the
+`encodeAndUpload` failure-retry path referenced a variable (`png`) that had
+been renamed to `image` during the PNG->JPEG change and no longer existed,
+which failed compilation outright until it was caught and fixed. Don't
+assume something's correct just because it was carefully reasoned through
+without a compiler - keep testing incrementally as more gets added.
 
 ## What changed on this branch, and why
 
@@ -399,31 +414,40 @@ carefully reasoned through without a compiler.
 2. **Disk-persisted retry queue** (`PendingSubmissionStore`, new file) -
    failed drop proofs used to live in an in-memory-only queue capped at 20,
    wiped on every restart. Now persists to
-   `<runelite dir>/timeserved-bingo-pending/` (JSON + PNG per proof) and
-   gets reloaded on `startUp()`. Cap raised to 100 since disk makes holding
-   more of them safe. (This used to also hold failed goal-progress reports;
-   that half was removed with the rest of the live-push path.)
+   `<runelite dir>/timeserved-bingo-pending/` (JSON + the encoded screenshot
+   per proof - `screenshotFile` is still named `<id>.png` even though the
+   bytes written there are JPEG since the PNG->JPEG change; `contentTypeOf`
+   sniffs magic bytes rather than trusting the extension, so this is a stale
+   filename, not a functional bug) and gets reloaded on `startUp()`. Cap
+   raised to 100 since disk makes holding more of them safe. (This used to
+   also hold failed goal-progress reports; that half was removed with the
+   rest of the live-push path.)
 
-3. **Verification code overlay** (`BingoVerificationOverlay`, new file) -
-   renders a manually-typed config value (`BingoConfig.verificationCode()`)
-   plus a live UTC timestamp in the top-left corner, baked into every proof
-   screenshot automatically (it's a normal overlay, so
-   `drawManager.requestNextFrameListener` just picks it up as part of the
-   frame). **Important**: this went through two versions. The first fetched
-   a server-generated code from `GET /api/board` - that endpoint requires no
-   auth at all, so anyone could've read the code, defeating the point. Fixed
-   to be a plain manually-entered setting instead (an admin picks a code,
-   announces it via Discord, each member pastes it in) - never touches the
-   site. If you ever see anything reintroducing a server round-trip for this
-   value, that's a regression of an already-identified security issue.
+3. **Verification code overlay** - originally `BingoVerificationOverlay` (now
+   removed, see "On-screen codeword overlay" below - `BingoCodewordOverlay` is
+   the only codeword overlay left in the codebase), which rendered a
+   manually-typed config value (`BingoConfig.verificationCode()`) plus a live
+   UTC timestamp, baked into every proof screenshot automatically. **The
+   still-relevant part**: this went through two versions early on. The first
+   fetched a server-generated code from `GET /api/board` - that endpoint
+   requires no auth at all, so anyone could've read the code, defeating the
+   point. Fixed to be a plain manually-entered setting instead (an admin
+   picks a code, announces it via Discord, each member pastes it in) - never
+   touches the site. That manually-entered model carried over to
+   `BingoCodewordOverlay` and still applies. If you ever see anything
+   reintroducing a server round-trip for this value, that's a regression of
+   an already-identified security issue.
 
 ## Bugs found from real client testing (all fixed)
 
 1. **Verification code was visible on-screen the whole session**, not just
    baked into screenshots - the overlay had no gating, so it always
-   rendered. Fixed: `BingoVerificationOverlay` only draws while
-   `setCaptureMode(true)`, which `BingoPlugin#captureAndSubmit` toggles on
-   for exactly the one frame `drawManager` captures, then back off.
+   rendered. Fixed at the time by only drawing while a capture-mode flag was
+   on. Moot now: `BingoVerificationOverlay` (the class this bug was in) has
+   since been removed entirely in favor of `BingoCodewordOverlay`, which is
+   an always-visible-when-enabled overlay by design (see "On-screen codeword
+   overlay" below) - there's no "hidden except during capture" mode to have
+   this bug in anymore.
 2. **XP tiles came back "completed" right after a board reset** - traced to
    a real race in the now-removed `reportXpProgress`: it only checked
    `GameState.LOGGED_IN`, which can flip true a moment before skill data is
@@ -451,74 +475,55 @@ carefully reasoned through without a compiler.
 5. **The submission banner didn't look like the collection-log style it
    was supposed to** - the first version used RuneLite's generic
    `PanelComponent` box. Replaced with a direct port of Anvil's
-   `BingoClogBannerOverlay`, including its actual background asset
-   (`clog_banner.png`, copied as-is - see `THIRD_PARTY_NOTICES.md`) and
-   its open/hold/close animation, not an approximation.
+   `BingoClogBannerOverlay`. Moot now - see "Removed: Collection Log tab and
+   submission banner" below, both are gone.
 
-## In-game Collection Log tab (first step only, untested)
+## Removed: Collection Log tab and submission banner
 
-Working toward showing the bingo board inside the actual Collection Log
-interface instead of only the side panel - same thing Anvil does. This is
-a bigger, multi-step effort; what exists so far is deliberately just the
-first, independently-verifiable step:
+Two features were prototyped and later dropped in commit `0868edf`
+("Drop the Collection Log tab, drop-submission popup, and item lootbeams"),
+along with ground-item lootbeam highlighting:
 
-- `BingoClogTabController` + `BingoClogIds` inject a real "Bingo" tab into
-  the Collection Log's native tab row (3-slice sprite, correct spacing,
-  copied render flags to match Jagex's own tabs), which currently just
-  shows a plain placeholder message when clicked, and restores native
-  content correctly when you navigate away (detected via the
-  `COLLECTION_DRAW_LIST` script firing, which only happens when the user
-  clicks a native tab/entry).
-- The technique - exact tab geometry/sprite ids, hiding the native boss
-  list, the navigate-away signal - is adapted from
-  `AhmedFathy2001/anvil-plugin`'s `ClogTabController` (BSD 2-Clause
-  License, Copyright (c) 2026 AhmedFathy2001; see `../anvil-plugin`,
-  re-clone if not present). `BingoClogIds` holds the specific borrowed
-  geometry/sprite constants, which Anvil's own file documents as measured
-  from a live client via RuneLite's widget debug dump - if the injected
-  tab ever renders wrong after a game update, that file plus
-  `BingoClogTabController` are the only places that should need touching.
-- **Deliberately not included yet**: the Adventure Log's alternate
-  interface id (only the main Collection Log is handled), and the
-  per-game-tick safety net Anvil also has as a backup to
-  `COLLECTION_DRAW_LIST` (e.g. for a search input swallowing the click
-  that would normally fire it) - add it if testing shows navigate-away
-  isn't always reliable.
-- **This has never been seen rendered.** Test it before building any real
-  board content on top: open the Collection Log, confirm a correctly
-  styled "Bingo" tab appears after the 5 native ones, click it and confirm
-  the placeholder text shows and the native boss list hides, click a
-  native tab and confirm everything restores properly (list reappears, our
-  tab's sprite goes back to unselected). Once that's solid, the next step
-  is porting `BingoPanel`'s board/goals/leaderboard rendering onto native
-  widgets in place of the placeholder - a much bigger follow-up.
+- **In-game Collection Log tab** (`BingoClogTabController` + `BingoClogIds`,
+  adapted from `AhmedFathy2001/anvil-plugin`'s `ClogTabController`) - was
+  working toward showing the bingo board inside the actual Collection Log
+  interface via a real injected "Bingo" tab. Dropped as an early prototype
+  with real style/positioning bugs (tab-label overflow among them) that
+  weren't worth chasing further given the scope this plugin is aiming for
+  (see "Scope / design philosophy" below). If this is ever revisited, treat
+  it as a fresh effort rather than resurrecting the removed classes -
+  nothing about the current codebase depends on it.
+- **On-screen submission banner** (`BingoProgressBanner`, a direct port of
+  Anvil's `BingoClogBannerOverlay` including its `clog_banner.png` asset) -
+  had a mismatched header style and an off-center popup that weren't fixed
+  before the decision was made to drop it rather than keep polishing it. The
+  chat-message confirmation (`notifyPlayer`, gated by "Notify on bingo
+  submit") is the only on-submit confirmation now.
 
-## Also added: an on-screen submission banner
-
-`BingoProgressBanner` shows a brief (3s) banner top-center of the screen
-when a bingo proof submits - same idea as Anvil's `BingoClogBannerOverlay`
-(confirmed by reading their actual source: it's a plain custom `Overlay`,
-not native game UI), simplified with no custom art asset or animation,
-just `PanelComponent`/`LineComponent` like `BingoVerificationOverlay`
-already uses.
+Don't reintroduce either without a fresh conversation about scope - they
+were deliberately dropped, not abandoned mid-flight for lack of time.
 
 ## What to actually test on this desktop
 
-- [ ] `./gradlew compileJava` - no JDK was available while doing the
-      hiscores-only rework (see "Goal-progress tracking" above), so the
-      result was only manually proofread, not compiled. Do this first.
-- [ ] `./gradlew runClient`, log in, set a plugin key.
+- [x] `./gradlew compileJava` - passes as of 2026-09-01 (see "History" above
+      for the `png`/`image` compile bug that had to be fixed first).
+- [x] `./gradlew runClient`, log in, set a plugin key - done 2026-09-01.
 - [ ] Get a bingo drop with the site/network reachable - confirm normal
       submit still works.
 - [ ] Force a failure (wrong site URL, or disconnect), get a drop, confirm
       it queues; restart the client; confirm it retries and submits once
-      reachable again.
+      reachable again. **Highest-priority remaining item** - this is the
+      exact code path the 2026-09-01 compile bug was in, and it has never
+      been exercised at runtime.
 - [ ] Open a kill-count or xp tile's board display and confirm it shows a
       number at all (server-computed `teamProgress`) - there's nothing left
       in the plugin to trigger for it, so this only proves the read path.
-- [ ] Set a verification code in config, confirm it + a timestamp render
-      top-left, and confirm a submitted proof screenshot actually has it
-      baked in.
+- [ ] Set a codeword in config, enable "Display codeword"
+      (`showLiveCodewordOverlay`), confirm it + a timestamp render via
+      `BingoCodewordOverlay` (draggable, anchored near the chatbox - not
+      top-left, that was the now-removed `BingoVerificationOverlay`'s
+      position), and confirm a submitted proof screenshot has it baked in
+      only if the overlay was actually visible at capture time.
 - [ ] Toggle "Show sidebar" off/on in config, confirm the nav icon
       disappears/reappears immediately with no restart.
 - [ ] On the site's Board Config admin page, untick "Bingo event active",
