@@ -1080,7 +1080,7 @@ public class BingoPlugin extends Plugin
 				if ("Could not reach the clan site".equals(error))
 				{
 					recentAttempts.remove(tile.tileId);
-					PendingSubmissionStore.PendingItem item = pendingStore.saveProof(tile.tileId, tile.name, itemId, itemName, png);
+					PendingSubmissionStore.PendingItem item = pendingStore.saveProof(tile.tileId, tile.name, itemId, itemName, image);
 					if (item != null)
 					{
 						enqueueRetry(item);
