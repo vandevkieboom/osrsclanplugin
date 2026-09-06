@@ -560,26 +560,9 @@ public class BingoPlugin extends Plugin
 	/**
 	 * Team assignment happens before an event rather than during one, so this
 	 * does not need to be prompt - it needs to eventually be right, at
-	 * negligible cost. Used while a bingo event is genuinely active, where
-	 * "eventually" should still mean "within the same event."
+	 * negligible cost.
 	 */
 	private static final long MY_TEAM_REFRESH_MILLIS = 30 * 60_000L;
-
-	/**
-	 * The interval used instead of the one above while bingo is inactive.
-	 * Deliberately much longer: this request is per-member and authenticated,
-	 * so unlike the shared anonymous poll it can never be served from a
-	 * cache - every call is a real, individual database hit. At the fast
-	 * interval, several dozen members each checking on their own independent
-	 * schedule adds up to the database being touched every 20-30 seconds
-	 * clan-wide, which is far more often than the 5-minute quiet gap Neon
-	 * needs to actually suspend between events - exactly the problem the
-	 * rest of today's work went to some trouble to get rid of. A day is
-	 * still "eventually, without needing a restart," which was the actual
-	 * goal - it was never "notice within half an hour" while nothing is
-	 * happening anyway.
-	 */
-	private static final long MY_TEAM_REFRESH_IDLE_MILLIS = 24 * 60 * 60_000L;
 
 	/**
 	 * How long the plugin will go without re-fetching the board while the
@@ -689,14 +672,13 @@ public class BingoPlugin extends Plugin
 
 		bingoActive = result.bingoActive;
 
-		// Deliberately outside the bingoActive gate below: gating this too
-		// meant an already-running client had no way to ever notice being
-		// added to a team while no event was active, short of a restart or
-		// re-pasting the key. maybeRefreshMyTeam uses a much slower interval
-		// of its own while idle (MY_TEAM_REFRESH_IDLE_MILLIS) so this doesn't
-		// reintroduce frequent per-member database hits between events - see
-		// that constant's doc for why the fast interval isn't safe here.
-		// Board work still only makes sense while an event is on.
+		// Deliberately outside the bingoActive gate below: maybeRefreshMyTeam
+		// is already throttled to once per 30 minutes specifically so it's
+		// cheap enough to run for every member regardless of participation
+		// (see its own doc) - gating it on bingoActive too meant an
+		// already-running client had no way to ever notice being added to a
+		// team while no event was active, short of a restart or re-pasting
+		// the key. Board work still only makes sense while an event is on.
 		maybeRefreshMyTeam();
 
 		if (bingoActive)
@@ -770,9 +752,8 @@ public class BingoPlugin extends Plugin
 	 */
 	private void maybeRefreshMyTeam()
 	{
-		long interval = bingoActive ? MY_TEAM_REFRESH_MILLIS : MY_TEAM_REFRESH_IDLE_MILLIS;
 		if (lastMyTeamFetchAt != 0L
-			&& System.currentTimeMillis() - lastMyTeamFetchAt < interval)
+			&& System.currentTimeMillis() - lastMyTeamFetchAt < MY_TEAM_REFRESH_MILLIS)
 		{
 			return;
 		}
