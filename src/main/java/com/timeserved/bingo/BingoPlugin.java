@@ -601,6 +601,17 @@ public class BingoPlugin extends Plugin
 	private static final long MY_TEAM_REFRESH_MILLIS = 30 * 60_000L;
 
 	/**
+	 * Floor on how often a board-marker change may force an early team
+	 * re-check (see onPolled). Without it, a busy event - where the marker
+	 * moves on every submission and approval, not just roster edits - turns
+	 * "check when something changed" into "check on every poll" against an
+	 * endpoint that cannot be cached. Five minutes still notices a roster
+	 * change far faster than the half-hour timer above, while capping the
+	 * worst case at twelve checks an hour per player instead of sixty.
+	 */
+	private static final long MY_TEAM_REFRESH_ON_CHANGE_MILLIS = 5 * 60_000L;
+
+	/**
 	 * How long the plugin will go without re-fetching the board while the
 	 * sidebar panel is closed.
 	 *
@@ -738,15 +749,23 @@ public class BingoPlugin extends Plugin
 
 		if (bingoActive)
 		{
-			// Re-check team membership whenever the board marker moves rather
-			// than only on a timer: roster edits bump it (there is a trigger on
-			// the users table for exactly this), so a member added to or removed
-			// from a team is picked up on the next poll instead of up to half an
-			// hour later - and, between marker changes, not asked for at all.
-			// This endpoint is per-member and so cannot be cached; every call is
-			// a real database read, which is why "only when something actually
-			// changed" matters more here than anywhere else.
-			if (!Objects.equals(result.boardChangedAt, lastBoardStamp))
+			// Re-check team membership when the board marker moves, not only on
+			// the slow timer: roster edits bump it (there is a trigger on the
+			// users table for exactly this), so an add or removal is picked up
+			// within a poll or two instead of up to half an hour later.
+			//
+			// Floored, though, and that floor is the whole reason this isn't
+			// just "clear the throttle": board_changed_at moves on every
+			// submission and every approval too, not only roster edits, and
+			// this signal cannot tell those apart. During a busy event with a
+			// hundred-plus active players the marker moves almost every minute,
+			// so an unfloored version had every online client re-checking its
+			// team on nearly every poll - roughly thirty times more often than
+			// the timer it replaced, against the one endpoint here that is
+			// per-member and therefore uncacheable, where every single call is
+			// a real function invocation and a real database read.
+			if (!Objects.equals(result.boardChangedAt, lastBoardStamp)
+				&& System.currentTimeMillis() - lastMyTeamFetchAt >= MY_TEAM_REFRESH_ON_CHANGE_MILLIS)
 			{
 				lastMyTeamFetchAt = 0L;
 			}
