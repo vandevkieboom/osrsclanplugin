@@ -15,6 +15,7 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ScheduledExecutorService;
@@ -315,6 +316,7 @@ public class BingoPlugin extends Plugin
 		lastMyTeamFetchAt = 0L;
 		myTeamId = null;
 		panelWasVisible = false;
+		lastBoard = null;
 	}
 
 	/** Idempotent - safe to call when the commands are already registered (guarded by commandsRegistered). */
@@ -445,6 +447,57 @@ public class BingoPlugin extends Plugin
 	 */
 
 	private volatile boolean panelWasVisible;
+
+	/** The last board fetched, kept so xp/kc progress arriving on a poll can be
+	 *  applied to it without paying for another board fetch. */
+	private volatile BoardResponse lastBoard;
+
+	/**
+	 * Updates the held board's xp/kc tiles from progress carried on the poll,
+	 * and repaints - no board fetch involved.
+	 *
+	 * <p>This is the replacement for the server bumping boardChangedAt every
+	 * time a number moved, which made every participant re-download the whole
+	 * board every two minutes for the duration of an event. Item tiles are
+	 * untouched: those only change when somebody submits something, which does
+	 * still move the board marker.
+	 */
+	private void applyGoalProgress(Map<String, Map<String, Long>> goalProgress)
+	{
+		BoardResponse board = lastBoard;
+		if (board == null || goalProgress == null || goalProgress.isEmpty())
+		{
+			return;
+		}
+
+		boolean changed = false;
+		for (BoardResponse.Team team : board.getTeams())
+		{
+			for (BoardResponse.Tile tile : team.getTiles())
+			{
+				if (!tile.isXpGoal() && !tile.isKcGoal())
+				{
+					continue;
+				}
+				Map<String, Long> byTeam = goalProgress.get(tile.goalKind + ":" + tile.goalKey);
+				if (byTeam == null)
+				{
+					continue;
+				}
+				Long value = byTeam.get(team.id);
+				if (value != null && !value.equals(tile.teamProgress))
+				{
+					tile.teamProgress = value;
+					changed = true;
+				}
+			}
+		}
+
+		if (changed)
+		{
+			SwingUtilities.invokeLater(() -> bingoPanel.refresh(board));
+		}
+	}
 
 	/**
 	 * Notices the sidebar panel being opened and fetches a board for it.
@@ -655,13 +708,39 @@ public class BingoPlugin extends Plugin
 			lastMyTeamFetchAt = 0L;
 		}
 
+		// The nav icon now tracks whether an event is running, not just team
+		// membership. Between events a leftover team assignment (rosters are
+		// not cleared by a board reset) otherwise left the board on screen
+		// indefinitely for anyone who took part in the previous bingo - and
+		// left it there even after an admin removed them from a team, since
+		// membership is only re-checked while an event is active.
+		if (bingoActive != wasActive)
+		{
+			updateNavVisibility();
+		}
+
 		if (bingoActive)
 		{
+			// Re-check team membership whenever the board marker moves rather
+			// than only on a timer: roster edits bump it (there is a trigger on
+			// the users table for exactly this), so a member added to or removed
+			// from a team is picked up on the next poll instead of up to half an
+			// hour later - and, between marker changes, not asked for at all.
+			// This endpoint is per-member and so cannot be cached; every call is
+			// a real database read, which is why "only when something actually
+			// changed" matters more here than anywhere else.
+			if (!Objects.equals(result.boardChangedAt, lastBoardStamp))
+			{
+				lastMyTeamFetchAt = 0L;
+			}
 			maybeRefreshMyTeam();
 			if (shouldRefreshBoard(result.boardChangedAt))
 			{
 				refreshBoard(result.boardChangedAt);
 			}
+			// After any board refresh above, so a fetched board isn't
+			// immediately overwritten with older numbers.
+			applyGoalProgress(result.goalProgress);
 			retryPendingSubmissions();
 		}
 	}
@@ -783,7 +862,7 @@ public class BingoPlugin extends Plugin
 	 */
 	private void updateNavVisibility()
 	{
-		if (config.showSidebar() && myTeamId != null)
+		if (config.showSidebar() && myTeamId != null && bingoActive)
 		{
 			clientToolbar.addNavigation(bingoNavButton);
 		}
@@ -864,6 +943,9 @@ public class BingoPlugin extends Plugin
 				// and gets re-fetched.
 				lastBoardStamp = board.boardChangedAt != null ? board.boardChangedAt : stamp;
 				lastBoardFetchAt = System.currentTimeMillis();
+				// Held so a poll can refresh xp/kc numbers on it without
+				// re-fetching the whole thing - see applyGoalProgress.
+				lastBoard = board;
 				// The board is a single cached copy shared by everyone, so it
 				// says nothing about who is asking. The team id comes from
 				// fetchMyTeam and is stitched in here, so findMyTeam() and the

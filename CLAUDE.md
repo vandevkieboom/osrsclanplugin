@@ -40,6 +40,41 @@ already does. See the website's own `CLAUDE.md` for the full reasoning.
 Don't reintroduce it without a concrete case the reorder approach can't
 cover.
 
+## 2026-09-06: what an event actually costs, and the four changes
+
+Read this before touching `onPolled`, `needsMoreProof`, or nav visibility.
+
+**The board is no longer re-fetched when xp/kc numbers move.** It used to be:
+the site bumped `boardChangedAt` whenever the reconcile updated progress (every
+two minutes), so every participant re-downloaded the entire board to refresh
+one number — ~180,000 full board renders over a two-week event, against a
+4-CPU-hour monthly allowance. Progress now arrives on the poll itself
+(`PollResponse#goalProgress`, per team, identical for everyone) and
+`applyGoalProgress` updates the held board in place. `lastBoard` exists solely
+for this. Freshness is unchanged; the re-fetching is gone.
+
+**`needsMoreProof()` reads `status`, not counts.** `approvedCount +
+pendingCount < requiredCount` looked reasonable and was silently wrong for
+every tile using item_requirements: `requiredCount` is the flat pre-sets field
+and often still says 1, so after the first drop the check went false and
+auto-submission died for the rest of the event. `status` is computed
+server-side from whichever rule that tile actually uses.
+
+**Team membership is re-checked when the board marker moves**, not every 30
+minutes. Roster edits bump it (there's a trigger on the users table for exactly
+that), so an add or removal is picked up on the next poll rather than up to half
+an hour later — and between changes it isn't asked for at all. That endpoint is
+per-member and therefore uncacheable: every call is a real database read.
+
+**The nav icon requires `bingoActive`.** Rosters survive a board reset, so
+between events a previous participant otherwise kept the board on screen
+indefinitely — including after an admin removed them from a team, since
+membership was only ever re-checked while an event was running.
+
+Note the server also refuses submissions outright when no event is active, so
+the client-side gating here is a courtesy that avoids a wasted screenshot, not
+the rule. Don't rely on the plugin for correctness: installs can be months old.
+
 ## Request volume: one poll per tick, only while logged in
 
 > **2026-09-06: the tick is now genuinely one request, and it no longer

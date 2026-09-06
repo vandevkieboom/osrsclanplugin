@@ -136,7 +136,17 @@ public class BoardResponse
 		 */
 		public boolean needsMoreProof()
 		{
-			return approvedCount + pendingCount < requiredCount;
+			// Keyed off the server's own completion verdict rather than
+			// re-deriving one from counts. requiredCount is the flat
+			// "how many proofs" field, and it stops meaning anything the
+			// moment a tile uses item_requirements (AND/OR item sets - see
+			// osrsclan/db/schema.sql): a tile needing four specific items
+			// might still carry requiredCount 1 from before those were set,
+			// so the count comparison went false after the very first drop
+			// and auto-submission silently died for the rest of the event.
+			// `status` is computed server-side from the real rule, whichever
+			// rule that tile uses.
+			return !"approved".equals(status);
 		}
 	}
 }

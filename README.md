@@ -22,9 +22,10 @@ outside an active event, and more often while one's running.
 - **`!needed [name]`** - what's missing for the next rank tier up.
 - **`!live`** - which clan members are currently streaming on Twitch.
 - **Sidebar panel** - your team's board, goal-tile progress, and a clan
-  leaderboard, with collapsible sections. Only appears at all while you're on
-  a bingo team - there's nothing in it for anyone else. Can be hidden
-  entirely via the **"Show bingo board"** toggle even while on a team.
+  leaderboard, with collapsible sections. Only appears while a bingo event is
+  actually running **and** you're on a team - there's nothing in it for anyone
+  else, and nothing to show between events. Can be hidden entirely via the
+  **"Show bingo board"** toggle even during an event.
 - **On-screen codeword overlay** - an optional, draggable overlay showing an
   admin-announced verification codeword (and, if enabled, a live timestamp),
   matching the Wise Old Man plugin's overlay style. It has to actually be on
@@ -52,12 +53,15 @@ the site has already computed.
 
 ## What it sends, and when
 
-- **Bingo proof**: while the plugin is enabled **and** a plugin key is set,
-  receiving a drop that matches one of your own team's tiles uploads a
-  screenshot of your game client at that moment, plus the matched OSRS item
-  id and tile id, to `https://timeserved.vercel.app`. Nothing is sent if the
-  key field is empty, and the plugin only ever sees loot your own client
-  receives. Every submission still lands in the clan site's admin review
+- **Bingo proof**: while a bingo event is running, the plugin is enabled
+  **and** a plugin key is set, receiving a drop that matches one of your own
+  team's tiles uploads a screenshot of your game client at that moment, plus
+  the matched OSRS item id and tile id, to `https://timeserved.vercel.app`.
+  Nothing is sent if the key field is empty, if you're not on a team, or if no
+  event is currently running - a drop landing before the event officially
+  starts is refused by the site, so nothing counts early. The plugin only ever
+  sees loot your own client receives. Every submission still lands in the
+  clan site's admin review
   queue - this plugin doesn't approve anything, it just saves you the manual
   upload.
 - **`!rank`/`!verify`/`!needed`**: sends the looked-up RSN (your own name by

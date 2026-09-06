@@ -6,6 +6,7 @@ import com.google.gson.JsonSyntaxException;
 import java.io.IOException;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import javax.inject.Inject;
@@ -319,6 +320,20 @@ public class BingoApiClient
 		 * they can't trust.
 		 */
 		public boolean degraded;
+
+		/**
+		 * Team-combined xp/kc progress, as goal_kind:goal_key -> team id ->
+		 * value. Example: {"xp:slayer": {"3": 1250000}}.
+		 *
+		 * <p>Carried on this tick so an xp/kc number can change without the
+		 * board being declared stale. It used to arrive the other way: the
+		 * server bumped boardChangedAt whenever progress moved, so every
+		 * participant re-downloaded the entire board - every tile, team and
+		 * submission - every two minutes for a whole event, to refresh one
+		 * number. Progress is per *team*, not per member, so it is identical
+		 * for everyone and rides along on the shared cached poll for free.
+		 */
+		public Map<String, Map<String, Long>> goalProgress;
 	}
 
 	/*
