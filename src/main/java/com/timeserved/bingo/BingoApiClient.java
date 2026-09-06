@@ -634,6 +634,194 @@ public class BingoApiClient
 		});
 	}
 
+	/** One participant's progress in a SOTW/BOTW competition. */
+	public static class EventParticipation
+	{
+		public Player player;
+
+		public static class Player
+		{
+			public String displayName;
+		}
+
+		public Progress progress;
+
+		public static class Progress
+		{
+			public long gained;
+		}
+	}
+
+	/** One SOTW/BOTW competition, with every participant's progress. */
+	public static class EventCompetition
+	{
+		public String title;
+
+		/** The WOM metric key, e.g. "slayer" or "vorkath" - display name, not this. */
+		public String metric;
+
+		/** "xp" or "kc" - decided server-side from the one skill list the site
+		 *  and this plugin both already have to agree on for tile icons,
+		 *  rather than this plugin keeping a second copy of it. */
+		public String metricType;
+
+		/** ISO instant; only meaningful for an ongoing or upcoming competition. */
+		public String startsAt;
+
+		/** ISO instant; only meaningful for an ongoing competition. */
+		public String endsAt;
+
+		public List<EventParticipation> participations;
+	}
+
+	/** Response shape for GET /api/wom-proxy?type=event-summary. */
+	public static class EventSummaryResponse
+	{
+		/** "ongoing", "upcoming", or "none". */
+		public String status;
+
+		/** Every competition matching {@link #status} - almost always one, but
+		 *  can be more than one if a BOTW and SOTW happen to overlap, and is
+		 *  empty when status is "none". */
+		public List<EventCompetition> competitions;
+	}
+
+	/**
+	 * The RuneLite plugin's `!event` chat command: whichever SOTW/BOTW
+	 * competition(s) the clan currently has ongoing (or the next upcoming one,
+	 * if none are), with every participant's progress. Public data, same
+	 * reasoning as fetchLiveStreams above - no plugin key needed or sent.
+	 */
+	public void fetchEventSummary(Consumer<EventSummaryResponse> onSuccess, Consumer<String> onError)
+	{
+		HttpUrl base = HttpUrl.parse(BASE_URL + "/api/wom-proxy");
+		if (base == null)
+		{
+			onError.accept("Invalid API base URL");
+			return;
+		}
+		HttpUrl url = base.newBuilder().addQueryParameter("type", "event-summary").build();
+		Request request = new Request.Builder().url(url).get().build();
+
+		httpClient.newCall(request).enqueue(new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException e)
+			{
+				log.debug("Failed to fetch event summary", e);
+				onError.accept("Could not reach the clan site");
+			}
+
+			@Override
+			public void onResponse(Call call, Response response)
+			{
+				try (Response closeable = response)
+				{
+					ResponseBody body = closeable.body();
+					if (!closeable.isSuccessful() || body == null)
+					{
+						onError.accept(describeFailure(closeable, parseErrorBody(body)));
+						return;
+					}
+					EventSummaryResponse parsed = gson.fromJson(body.charStream(), EventSummaryResponse.class);
+					if (parsed == null)
+					{
+						onError.accept("The clan site returned an empty response");
+						return;
+					}
+					if (parsed.competitions == null)
+					{
+						parsed.competitions = Collections.emptyList();
+					}
+					onSuccess.accept(parsed);
+				}
+				catch (JsonSyntaxException e)
+				{
+					log.debug("Malformed event summary response", e);
+					onError.accept("The clan site returned an unexpected response");
+				}
+			}
+		});
+	}
+
+	/**
+	 * Where the clan-wide broadcast lives - a small public JSON file on Vercel
+	 * Blob, not an endpoint on the clan site. This is the one deliberate
+	 * exception to this class's usual "every request goes to BASE_URL" rule
+	 * (see the class doc): it is hardcoded, not a URL taken from any API
+	 * response, so it doesn't run into the Plugin Hub review concern that doc
+	 * describes - the same reasoning that already lets this plugin hardcode
+	 * static.runelite.net and oldschool.runescape.wiki for item/skill icons.
+	 *
+	 * <p>Reading it this way, straight from Blob's CDN, rather than through a
+	 * clan-site endpoint, is what makes checking it every single minute for
+	 * every one of 100+ installs cost nothing: no Vercel function runs for
+	 * this at all, so it's unaffected by how many people are checking or how
+	 * often. See osrsclan's api/_lib/broadcast.ts for the write side and why
+	 * this replaces the old Postgres-column version of the same feature.
+	 *
+	 * <p>If the clan's Blob store is ever recreated, this host changes and
+	 * would need updating here - a wrong host just fails every check
+	 * silently (see fetchBroadcast), it can't crash anything.
+	 */
+	private static final String BROADCAST_URL =
+		"https://o3vcuwswsm0xzkof.public.blob.vercel-storage.com/broadcast.json";
+
+	public static class Broadcast
+	{
+		public String message;
+		public String updatedAt;
+	}
+
+	/**
+	 * Checks the clan-wide broadcast. Deliberately silent on any failure
+	 * (network error, bad host, malformed response) rather than surfacing an
+	 * error anywhere - this runs on every scheduled tick for every install
+	 * regardless of whether anyone is looking, unlike an explicit chat
+	 * command where a player is actively waiting on a reply.
+	 */
+	public void fetchBroadcast(Consumer<Broadcast> onSuccess)
+	{
+		HttpUrl url = HttpUrl.parse(BROADCAST_URL);
+		if (url == null)
+		{
+			return;
+		}
+		Request request = new Request.Builder().url(url).get().build();
+
+		httpClient.newCall(request).enqueue(new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException e)
+			{
+				log.debug("Failed to fetch broadcast", e);
+			}
+
+			@Override
+			public void onResponse(Call call, Response response)
+			{
+				try (Response closeable = response)
+				{
+					ResponseBody body = closeable.body();
+					if (!closeable.isSuccessful() || body == null)
+					{
+						log.debug("Broadcast fetch returned {}", closeable.code());
+						return;
+					}
+					Broadcast parsed = gson.fromJson(body.charStream(), Broadcast.class);
+					if (parsed != null)
+					{
+						onSuccess.accept(parsed);
+					}
+				}
+				catch (JsonSyntaxException e)
+				{
+					log.debug("Malformed broadcast response", e);
+				}
+			}
+		});
+	}
+
 	/** A parsed {"error": "...", "reason": "..."} body - reason is usually absent. */
 	private static class ErrorBody
 	{

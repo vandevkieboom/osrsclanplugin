@@ -6,7 +6,9 @@ chat commands and, during a bingo event, automatically screenshots and
 submits your drops as proof, no manual uploading needed.
 
 If you never set a plugin key, the plugin makes no background requests to the
-clan site at all.
+clan site at all - it only checks for a clan-wide admin broadcast once a
+minute, which costs nothing and can be turned off in settings if you'd rather
+not have it.
 
 ## Setup
 
@@ -31,9 +33,16 @@ exposed, revoking it and generating a new one takes seconds.
 | `!verify [name]` | A stricter check: 6+ Crystal Armour Seeds and an Enhanced Crystal Weapon Seed, 800+ Corrupted Gauntlet KC, or a Twisted Bow. |
 | `!needed [name]` | What's missing for the next rank tier up. |
 | `!live` | Which clan members are currently streaming on Twitch. |
+| `!event [name]` | The current BOTW/SOTW's leaderboard, or that member's own progress in it. |
 
 All of these can be turned off with the **"Clan chat commands"** toggle if
 you'd rather not have them.
+
+## Clan broadcasts
+
+Admins can post a message from the site that shows up as an in-game chat
+message for everyone, whether or not you're taking part in a bingo. Turn it
+off with the **"Clan broadcasts"** toggle if you'd rather not see them.
 
 ## During a bingo event
 
@@ -47,9 +56,9 @@ you'd rather not have them.
   on a team; there's nothing to show otherwise. Turn it off entirely with
   the **"Show bingo board"** toggle if you'd rather not see it.
 - **Kill-count and skill-XP tiles need nothing from you.** Those are tracked
-  automatically from your synced RuneProfile hiscores, just keep RuneProfile
-  synced (the plugin reminds you once a day if it isn't) and your progress
-  shows up on the board on its own.
+  automatically from Wise Old Man's hiscores, just make sure you're synced to
+  the clan's Wise Old Man group and your progress shows up on the board on
+  its own.
 - **Optional extras**, each with its own toggle: a confirmation message (and a
   "crab dance" emote) when a drop submits successfully, and an on-screen
   codeword overlay for admin-run verification events.
@@ -84,6 +93,11 @@ appears in-game.
   visible to anyone on the site's Clan Rankings page.
 - **`!live`**: sends nothing about you at all, just asks which clan Twitch
   channels are currently live.
+- **`!event`**: sends nothing about you either, just asks for the current
+  BOTW/SOTW's public standings.
+- **Clan broadcasts**: read-only, checked once a minute regardless of whether
+  a key is set. Nothing about you is sent; it just checks whether an admin
+  has posted a new message.
 
 Which item drops count toward which tiles is configured by clan admins on
 the site, not by you.

@@ -52,6 +52,18 @@ public interface BingoConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "notifyBroadcasts",
+		name = "Clan broadcasts",
+		description = "Show messages sent by admins from the clan site.",
+		section = clanSection,
+		position = 5
+	)
+	default boolean notifyBroadcasts()
+	{
+		return true;
+	}
+
+	@ConfigItem(
 		keyName = "enableClanCommands",
 		name = "Clan chat commands",
 		description = "Turn off the !rank, !verify, !needed, and !live chat commands entirely.",

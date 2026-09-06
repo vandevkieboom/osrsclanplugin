@@ -7,6 +7,8 @@ import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.time.Duration;
+import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -14,6 +16,7 @@ import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
@@ -141,6 +144,9 @@ public class BingoPlugin extends Plugin
 
 	/** Same visible-reply mechanism as !rank - see setChatReply. */
 	private static final String LIVE_COMMAND = "!live";
+
+	/** Same visible-reply mechanism as !rank - see setChatReply. */
+	private static final String EVENT_COMMAND = "!event";
 
 	/** Guards registerCommands()/unregisterCommands() so either is safe to call more than once in a row. */
 	private boolean commandsRegistered;
@@ -330,6 +336,7 @@ public class BingoPlugin extends Plugin
 		chatCommandManager.registerCommandAsync(VERIFY_COMMAND, this::onVerifyCommand);
 		chatCommandManager.registerCommandAsync(NEEDED_COMMAND, this::onNeededCommand);
 		chatCommandManager.registerCommandAsync(LIVE_COMMAND, this::onLiveCommand);
+		chatCommandManager.registerCommandAsync(EVENT_COMMAND, this::onEventCommand);
 		commandsRegistered = true;
 	}
 
@@ -344,6 +351,7 @@ public class BingoPlugin extends Plugin
 		chatCommandManager.unregisterCommand(VERIFY_COMMAND);
 		chatCommandManager.unregisterCommand(NEEDED_COMMAND);
 		chatCommandManager.unregisterCommand(LIVE_COMMAND);
+		chatCommandManager.unregisterCommand(EVENT_COMMAND);
 		commandsRegistered = false;
 	}
 
@@ -396,22 +404,25 @@ public class BingoPlugin extends Plugin
 	}
 
 	/**
-	 * The plugin's whole periodic workload: one request, once a minute, only
-	 * while actually logged in, and only for members who have a plugin key
-	 * set at all (see hasAnythingToPollFor).
+	 * The plugin's periodic workload, once a minute, only while actually
+	 * logged in.
 	 *
-	 * <p>This used to be three requests every minute - bingo status, clan
-	 * broadcast, live streams - fired unconditionally for as long as the
-	 * client was open, logged in or not, for every install regardless of
-	 * whether they had anything to do with bingo. That is roughly 4,300
-	 * requests per member per day doing nothing, and across the clan it was
-	 * enough to exhaust the site's hosting quotas outright, at which point
-	 * the site started failing for everyone. Broadcast and live-stream
-	 * notifications were later removed entirely rather than just merged, so
-	 * the only thing left to poll for is bingo state, and only bingo
-	 * participants have any reason to ask for it - between events, or for
-	 * the several hundred members who just use the chat commands, this tick
-	 * makes zero requests at all.
+	 * <p>Two very differently-shaped things happen here, and the distinction
+	 * matters. poll() is a real clan-site request and only runs for members
+	 * with a plugin key set (see hasAnythingToPollFor) - between events, or
+	 * for the several hundred members who just use the chat commands, that
+	 * half of the tick makes zero requests. fetchBroadcast() runs
+	 * unconditionally, for every install, key or no key - but it reads a
+	 * static file straight off Vercel Blob's CDN rather than calling a
+	 * clan-site endpoint (see BingoApiClient#BROADCAST_URL), so no Vercel
+	 * function ever runs for it. Both properties matter for the same reason:
+	 * this plugin once made three real requests a minute unconditionally for
+	 * every install regardless of bingo relevance - roughly 4,300 requests a
+	 * day per member doing nothing - which was enough on its own to exhaust
+	 * the site's hosting quotas and take the site down for everyone. Bingo
+	 * status is now asked only by participants; broadcast is asked by
+	 * everyone, same as before, but in a shape that costs nothing regardless
+	 * of how many people check it.
 	 *
 	 * <p>Nothing runs while logged out either: every result this could
 	 * deliver is a game chat message or a board the player is looking at
@@ -427,6 +438,14 @@ public class BingoPlugin extends Plugin
 	public void scheduledRefresh()
 	{
 		poll();
+		// Same login gate poll() applies internally - nothing this delivers
+		// can reach the player while logged out (it's a chat message), so
+		// checking at the login screen would just be wasted, even though the
+		// check itself costs nothing on the server side.
+		if (client.getGameState() == GameState.LOGGED_IN)
+		{
+			api.fetchBroadcast(this::handleBroadcast);
+		}
 	}
 
 	/*
@@ -652,20 +671,67 @@ public class BingoPlugin extends Plugin
 	}
 
 	/**
-	 * Whether this install has any reason to be talking to the site on a timer.
+	 * Whether this install has any reason to make a real clan-site request on
+	 * a timer. Live-stream notifications are gone entirely - the periodic
+	 * poll exists purely to deliver bingo state to actual participants, and a
+	 * plugin key is what a participant has. Nobody without one has anything
+	 * for this tick to tell them, so between events (or for the several
+	 * hundred members who just use the chat commands) this half of the tick
+	 * makes zero requests.
 	 *
-	 * <p>Live-stream notifications and admin broadcasts were removed entirely
-	 * - the periodic poll now exists purely to deliver bingo state to actual
-	 * participants. A plugin key is what a bingo participant has, so it is the
-	 * only reason left to poll at all: nobody without one has anything for
-	 * this tick to tell them, so between events (or for the several hundred
-	 * members who just use the chat commands) this install makes zero
-	 * background requests. The chat commands are unaffected either way: they
-	 * are sent when typed, and never poll.
+	 * <p>The clan broadcast is deliberately not part of this gate - see
+	 * scheduledRefresh - because it has to reach everyone, key or not, and it
+	 * does so without costing a clan-site request at all.
 	 */
 	private boolean hasAnythingToPollFor()
 	{
 		return !config.apiKey().trim().isEmpty();
+	}
+
+	private static final String LAST_SEEN_BROADCAST_KEY = "lastSeenBroadcast";
+
+	/**
+	 * Announces a new clan broadcast in chat, once. See
+	 * BingoApiClient#BROADCAST_URL / osrsclan's api/_lib/broadcast.ts for why
+	 * this can run for every install, every minute, at essentially no cost -
+	 * unlike everything else on this tick, it never reaches the clan site's
+	 * own servers at all.
+	 */
+	private void handleBroadcast(BingoApiClient.Broadcast broadcast)
+	{
+		if (broadcast == null
+			|| broadcast.message == null
+			|| broadcast.message.isEmpty()
+			|| broadcast.updatedAt == null)
+		{
+			return;
+		}
+
+		String lastSeen = configManager.getConfiguration(BingoConfig.GROUP, LAST_SEEN_BROADCAST_KEY);
+		if (broadcast.updatedAt.equals(lastSeen))
+		{
+			return;
+		}
+
+		// The file always holds the *current* message, not just unseen ones,
+		// so "haven't seen this timestamp before" isn't on its own enough to
+		// mean "this is news". On a brand new install there is no stored
+		// timestamp at all, which would otherwise announce whatever broadcast
+		// happened to be current - possibly days old - as if it had just been
+		// sent. The first observation only records where we came in;
+		// anything after it is genuinely new.
+		boolean firstObservation = lastSeen == null;
+		configManager.setConfiguration(BingoConfig.GROUP, LAST_SEEN_BROADCAST_KEY, broadcast.updatedAt);
+
+		// Tracked even while the toggle is off, and only *displayed* when it
+		// is on - skipping the bookkeeping instead would mean turning the
+		// toggle back on later replays whatever stale message was current
+		// when it was turned off, the same bug in a different disguise.
+		if (firstObservation || !config.notifyBroadcasts())
+		{
+			return;
+		}
+		sendChatMessage(broadcast.message, config.clanMessageColor());
 	}
 
 	private void onPolled(BingoApiClient.PollResponse result)
@@ -1405,6 +1471,25 @@ public class BingoPlugin extends Plugin
 			error -> setChatReply(chatMessage, error));
 	}
 
+	/**
+	 * Handles "!event [name]". Unlike !rank/!needed, no name defaults to
+	 * showing overall standings rather than the sender's own progress -
+	 * "!event" alone asking about yourself would be a strange default for a
+	 * clan-wide leaderboard command. Needs no plugin key: this is public WOM
+	 * competition data, same reasoning as !live.
+	 */
+	private void onEventCommand(ChatMessage chatMessage, String message)
+	{
+		String typed = message.length() > EVENT_COMMAND.length()
+			? message.substring(EVENT_COMMAND.length()).trim()
+			: "";
+		String targetName = typed.isEmpty() ? null : Text.sanitize(typed);
+
+		api.fetchEventSummary(
+			result -> setChatReply(chatMessage, formatEventResult(result, targetName)),
+			error -> setChatReply(chatMessage, error));
+	}
+
 	/** The bit after the command word, or the sender's own name if nothing follows it. */
 	private String commandArgument(String message, String command, ChatMessage chatMessage)
 	{
@@ -1511,6 +1596,174 @@ public class BingoPlugin extends Plugin
 			text.append(", +").append(streams.size() - shown).append(" more");
 		}
 		return text.toString();
+	}
+
+	/** Top standings shown per competition before truncating - keeps a reply
+	 *  with several ongoing competitions from flooding chat. */
+	private static final int EVENT_TOP_N = 5;
+
+	private String formatEventResult(BingoApiClient.EventSummaryResponse result, String targetName)
+	{
+		if ("none".equals(result.status) || result.competitions.isEmpty())
+		{
+			return "No BOTW/SOTW running right now.";
+		}
+
+		boolean upcoming = "upcoming".equals(result.status);
+		List<String> parts = new ArrayList<>();
+		boolean foundTarget = false;
+
+		for (BingoApiClient.EventCompetition comp : result.competitions)
+		{
+			String label = "xp".equals(comp.metricType) ? "SOTW" : "BOTW";
+			String metric = humanizeMetric(comp.metric);
+
+			if (upcoming)
+			{
+				parts.add(label + ": " + metric + " starts in " + formatCountdown(comp.startsAt));
+				continue;
+			}
+
+			if (targetName != null)
+			{
+				String found = formatPersonalProgress(comp, label, metric, targetName);
+				if (found != null)
+				{
+					parts.add(found);
+					foundTarget = true;
+				}
+				continue;
+			}
+
+			parts.add(label + ": " + metric + " (ends in " + formatCountdown(comp.endsAt) + ") - "
+				+ formatStandings(comp));
+		}
+
+		if (targetName != null && !foundTarget)
+		{
+			return targetName + " isn't competing in the current event" + (result.competitions.size() > 1 ? "s" : "") + ".";
+		}
+
+		return String.join("  |  ", parts);
+	}
+
+	/** Null when this player isn't in this specific competition - the caller
+	 *  tries the next one before giving up. */
+	private String formatPersonalProgress(BingoApiClient.EventCompetition comp, String label, String metric, String targetName)
+	{
+		List<BingoApiClient.EventParticipation> ranked = rankedParticipants(comp);
+		for (int i = 0; i < ranked.size(); i++)
+		{
+			BingoApiClient.EventParticipation p = ranked.get(i);
+			if (p.player != null && targetName.equalsIgnoreCase(p.player.displayName))
+			{
+				return targetName + ": " + formatNumber(p.progress.gained) + " " + comp.metricType
+					+ " gained in " + metric + " " + label + " (rank " + (i + 1) + " of " + ranked.size() + ")";
+			}
+		}
+		return null;
+	}
+
+	private String formatStandings(BingoApiClient.EventCompetition comp)
+	{
+		List<BingoApiClient.EventParticipation> ranked = rankedParticipants(comp);
+		int shown = Math.min(EVENT_TOP_N, ranked.size());
+		StringBuilder text = new StringBuilder();
+		for (int i = 0; i < shown; i++)
+		{
+			if (i > 0)
+			{
+				text.append("  ");
+			}
+			BingoApiClient.EventParticipation p = ranked.get(i);
+			String name = p.player != null ? p.player.displayName : "?";
+			text.append(i + 1).append(". ").append(name).append(" ")
+				.append(formatNumber(p.progress.gained)).append(" ").append(comp.metricType);
+		}
+		return text.toString();
+	}
+
+	private List<BingoApiClient.EventParticipation> rankedParticipants(BingoApiClient.EventCompetition comp)
+	{
+		List<BingoApiClient.EventParticipation> ranked = new ArrayList<>(
+			comp.participations == null ? Collections.emptyList() : comp.participations);
+		ranked.sort((a, b) -> Long.compare(b.progress.gained, a.progress.gained));
+		return ranked;
+	}
+
+	private String formatNumber(long value)
+	{
+		return String.format(Locale.ROOT, "%,d", value);
+	}
+
+	/** "kril_tsutsaroth" -> "Kril Tsutsaroth". Good enough for a chat message;
+	 *  not attempting proper capitalisation of small words like "of". */
+	private String humanizeMetric(String metric)
+	{
+		if (metric == null || metric.isEmpty())
+		{
+			return "?";
+		}
+		String[] words = metric.replace('_', ' ').split(" ");
+		StringBuilder text = new StringBuilder();
+		for (String word : words)
+		{
+			if (word.isEmpty())
+			{
+				continue;
+			}
+			if (text.length() > 0)
+			{
+				text.append(' ');
+			}
+			text.append(Character.toUpperCase(word.charAt(0))).append(word.substring(1));
+		}
+		return text.toString();
+	}
+
+	/** "3d 4h" / "6h 12m" / "less than a minute" - deliberately coarse, this
+	 *  is a rough sense of time left, not a countdown timer. */
+	private String formatCountdown(String isoInstant)
+	{
+		if (isoInstant == null)
+		{
+			return "an unknown time";
+		}
+		try
+		{
+			Instant target = Instant.parse(isoInstant);
+			Duration remaining = Duration.between(Instant.now(), target);
+			boolean past = remaining.isNegative();
+			Duration abs = remaining.abs();
+
+			long days = abs.toDays();
+			long hours = abs.toHours() % 24;
+			long minutes = abs.toMinutes() % 60;
+
+			String amount;
+			if (days > 0)
+			{
+				amount = days + "d " + hours + "h";
+			}
+			else if (hours > 0)
+			{
+				amount = hours + "h " + minutes + "m";
+			}
+			else if (minutes > 0)
+			{
+				amount = minutes + "m";
+			}
+			else
+			{
+				amount = "under a minute";
+			}
+			return past ? amount + " ago" : amount;
+		}
+		catch (RuntimeException e)
+		{
+			log.debug("Could not parse event timestamp {}", isoInstant, e);
+			return "an unknown time";
+		}
 	}
 
 	/**

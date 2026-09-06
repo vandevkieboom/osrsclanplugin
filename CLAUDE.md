@@ -272,6 +272,24 @@ not a bug).
 
 ## Broadcast and live-stream notifications: removed entirely
 
+> **Broadcast is back, 2026-09-07 - `!event` above shipped alongside it.**
+> `hasAnythingToPollFor`/`scheduledRefresh` no longer make "zero background
+> requests for non-participants" fully true: `BingoApiClient#fetchBroadcast`
+> now runs unconditionally, every minute, for every install. What makes that
+> safe is *what* it reads - a small public file on Vercel Blob's own CDN, not
+> a clan-site endpoint - so no Vercel function runs for it at all, and the
+> per-request cost that made the original version expensive (see the
+> uncorrected paragraph below) simply doesn't exist this time. `handleBroadcast`
+> is otherwise the same logic as before (persisted last-seen timestamp via
+> `configManager`, `notifyBroadcasts` toggle, `firstObservation` guard so a
+> fresh install doesn't announce a days-old message as new) - only how it's
+> fetched changed, not the announcing logic itself.
+>
+> Live-stream notifications are still not back - see the correction just below
+> for why that one was always a different (Vercel-request-volume) problem than
+> broadcast's (Neon-compute) one, which is exactly why they didn't come back
+> together.
+
 > **Correction, 2026-09-06.** The Neon reasoning below is right about
 > *broadcast* and wrong about *live streams*. The site's `api/twitch-live.ts`
 > contains no database calls at all - it asks Twitch and returns the answer -
