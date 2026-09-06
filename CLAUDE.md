@@ -9,6 +9,37 @@ the clan site at `https://timeserved.vercel.app` (companion repo: `osrsclan`,
 same parent folder) via `BingoApiClient`, authenticated with a plugin key
 pasted into config (`BingoConfig.apiKey()`).
 
+## Tile icons: a real skill sprite for xp-goal tiles
+
+Written and reviewed 2026-09-06, alongside a matching website-side change
+(the sibling `osrsclan` repo's `api/_lib/icons.ts`, `SKILL_ICON_FILES`).
+`BingoPanel#loadIconInto` used to leave xp-goal tiles (team-combined skill
+XP) with no picture at all, since they have no natural item to derive one
+from. It now falls back to a built-in RuneLite skill sprite via a new
+`SKILL_SPRITES` map (a `SpriteManager`-backed cache, kept separate from the
+existing item-icon cache) - keyed by `goalKey`, case-insensitively, with
+`Locale.ROOT` forced deliberately: a Turkish/Azeri client's default locale
+lowercases "I" to a dotless "ı", which would otherwise miss this map for a
+key like "FISHING" even though the website's (locale-independent) JS
+lowercasing would still match it - the exact two-sides-disagree failure
+this shared map exists to prevent.
+
+**`SKILL_SPRITES` must be kept key-for-key identical to the website's
+`SKILL_ICON_FILES`** - same 26 keys, including both alias pairs
+(`defence`/`defense`, `runecraft`/`runecrafting`) - or the two sides will
+disagree about which tiles get a skill icon at all. Verified in review to
+match exactly; re-verify by hand if either map is ever touched again, there
+is no automated test crossing this specific boundary.
+
+An earlier version of this also carried an explicit per-tile icon override
+(`BoardResponse.Tile.iconItemId`, an admin-pinned item id) - removed the
+same day, before ever shipping to the plugin, as redundant: its whole
+purpose (picking a specific item's picture) is already free by listing that
+item first in the tile's item list, which is what the existing fallback
+already does. See the website's own `CLAUDE.md` for the full reasoning.
+Don't reintroduce it without a concrete case the reorder approach can't
+cover.
+
 ## Request volume: one poll per tick, only while logged in
 
 > **Superseded 2026-09-02** - the merge-three-requests-into-one fix below
