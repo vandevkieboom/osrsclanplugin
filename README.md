@@ -1,106 +1,89 @@
 # Time Served
 
-A RuneLite plugin for the Time Served clan: chat commands plus automatic
-bingo tile proof submission. When you receive a drop that matches one of your
-team's bingo tiles, it screenshots your client and submits it as proof to the
-clan site automatically, so nobody has to take and upload screenshots by hand.
-Members who've never set a plugin key make no background requests to the
-clan site at all, ever. Members who have one check in only occasionally
-outside an active event, and more often while one's running.
+A RuneLite plugin for the **Time Served** OSRS clan, built around
+[timeserved.vercel.app](https://timeserved.vercel.app). It gives you clan
+chat commands and, during a bingo event, automatically screenshots and
+submits your drops as proof, no manual uploading needed.
 
-## Features
-
-- **Automatic bingo proof submission** - screenshots and uploads proof the
-  moment a matching drop lands, with a disk-persisted retry queue if the site
-  is unreachable so a dropped connection doesn't lose your proof.
-- **`!rank [name]`** - reports which clan rank tier a member (or the sender,
-  if no name is given) is eligible for, based on their synced RuneProfile
-  data. Same check as the site's "Auto-Verify" button.
-- **`!verify [name]`** - checks a separate, stricter gate: whether the member
-  has 6+ Crystal Armour Seeds plus an Enhanced Crystal Weapon Seed, 800+
-  Corrupted Gauntlet kc, or a Twisted Bow.
-- **`!needed [name]`** - what's missing for the next rank tier up.
-- **`!live`** - which clan members are currently streaming on Twitch.
-- **Sidebar panel** - your team's board, goal-tile progress, and a clan
-  leaderboard, with collapsible sections. Only appears while a bingo event is
-  actually running **and** you're on a team - there's nothing in it for anyone
-  else, and nothing to show between events. Can be hidden entirely via the
-  **"Show bingo board"** toggle even during an event.
-- **On-screen codeword overlay** - an optional, draggable overlay showing an
-  admin-announced verification codeword (and, if enabled, a live timestamp),
-  matching the Wise Old Man plugin's overlay style. It has to actually be on
-  screen at the moment you take/receive a proof to end up baked into that
-  screenshot - it's a normal overlay, not a hidden watermark.
-- **Bingo submit notifications** - an optional chat message confirming a
-  proof went through (or failed), and an optional "crab dance" emote played
-  on a successful bingo drop.
-- **RuneProfile sync reminder** - a one-time-per-day nudge (not once per
-  login) if your RuneProfile isn't synced yet, since several commands and
-  bingo verification depend on it.
-
-All chat commands can be turned off entirely with the **"Clan chat commands"**
-config toggle. Notification message colors (for the sync reminder/command
-usage messages, and bingo submissions separately) are configurable too.
-
-## Kill-count and skill-XP tiles need no action from you
-
-Item-drop tiles are the only kind you interact with directly. Team-combined
-boss KC and skill-XP tiles are tracked entirely by the clan site itself, from
-your synced RuneProfile hiscores - the plugin doesn't read or report your
-live KC/XP at all. As long as your RuneProfile is synced, your progress on
-those tiles is picked up automatically; the board just displays the number
-the site has already computed.
-
-## What it sends, and when
-
-- **Bingo proof**: while a bingo event is running, the plugin is enabled
-  **and** a plugin key is set, receiving a drop that matches one of your own
-  team's tiles uploads a screenshot of your game client at that moment, plus
-  the matched OSRS item id and tile id, to `https://timeserved.vercel.app`.
-  Nothing is sent if the key field is empty, if you're not on a team, or if no
-  event is currently running - a drop landing before the event officially
-  starts is refused by the site, so nothing counts early. The plugin only ever
-  sees loot your own client receives. Every submission still lands in the
-  clan site's admin review
-  queue - this plugin doesn't approve anything, it just saves you the manual
-  upload.
-- **`!rank`/`!verify`/`!needed`**: sends the looked-up RSN (your own name by
-  default, or whichever name was typed) to `https://timeserved.vercel.app`.
-  No plugin key involved - this is the same public data already visible on
-  the clan site's Clan Rankings page to anyone, logged in or not.
-- **`!live`**: no RSN sent at all - just asks the clan site which of its
-  configured Twitch channels are currently live, on demand when typed.
+If you never set a plugin key, the plugin makes no background requests to the
+clan site at all.
 
 ## Setup
 
-1. Log in on the clan site and go to **Settings → RuneLite plugin keys**.
-2. Generate a key and copy it (it's only shown once).
-3. In RuneLite, enable **Time Served** and paste the key into
-   **Plugin key**.
+1. Log in at [timeserved.vercel.app](https://timeserved.vercel.app) and go to
+   **Settings → RuneLite plugin keys**.
+2. Click **Generate**, then copy the key (it's only shown once).
+3. In RuneLite's plugin settings, enable **Time Served** and paste the key
+   into the **Plugin key** field.
 
-If a key is ever exposed, revoke it on the same settings page and generate a
-new one.
+**A plugin key is only needed for bingo participation.** The chat commands
+work without one. If you're not currently taking part in a bingo, don't
+bother setting a key at all, and once an event you did take part in ends,
+it's good practice to clear the key (or revoke it on that same settings
+page) rather than leave it sitting there. It also means if a key is ever
+exposed, revoking it and generating a new one takes seconds.
 
-## How detection works
+## Chat commands
 
-The plugin listens for RuneLite's loot events (`NpcLootReceived` for kills, and
-`LootReceived` for chests, caskets and raid rewards). Those only fire for loot
-actually obtained in game - buying an item, withdrawing it from the bank or
-receiving it in a trade produces no event, so a bought item can't be passed off
-as a drop.
+| Command | What it does |
+|---|---|
+| `!rank [name]` | Which clan rank tier that member (or you, if no name given) qualifies for, based on their synced RuneProfile. |
+| `!verify [name]` | A stricter check: 6+ Crystal Armour Seeds and an Enhanced Crystal Weapon Seed, 800+ Corrupted Gauntlet KC, or a Twisted Bow. |
+| `!needed [name]` | What's missing for the next rank tier up. |
+| `!live` | Which clan members are currently streaming on Twitch. |
 
-Which item ids count for which tile is configured by clan admins on the site.
-Tiles with no item ids stay manual-upload only.
+All of these can be turned off with the **"Clan chat commands"** toggle if
+you'd rather not have them.
 
-The server re-validates every submission (that the item satisfies the tile, and
-that the tile still needs proof), so a stale board in the client can't create a
-bogus submission.
+## During a bingo event
 
-## Building locally
+- **Drops submit themselves.** The moment you receive an item matching one of
+  your team's tiles, it's screenshotted and uploaded automatically. If the
+  site is briefly unreachable, the submission is saved and retried
+  automatically, so you won't lose it.
+- **The sidebar panel** shows your team's board, tile progress, and clan
+  standings (the same board is also on the website, if you'd rather check it
+  there). It only appears while an event is actually running **and** you're
+  on a team; there's nothing to show otherwise. Turn it off entirely with
+  the **"Show bingo board"** toggle if you'd rather not see it.
+- **Kill-count and skill-XP tiles need nothing from you.** Those are tracked
+  automatically from your synced RuneProfile hiscores, just keep RuneProfile
+  synced (the plugin reminds you once a day if it isn't) and your progress
+  shows up on the board on its own.
+- **Optional extras**, each with its own toggle: a confirmation message (and a
+  "crab dance" emote) when a drop submits successfully, and an on-screen
+  codeword overlay for admin-run verification events.
 
-```bash
-./gradlew build       # compile
-./gradlew runClient   # launch RuneLite with the plugin side-loaded
-```
+## Troubleshooting
 
-Requires JDK 11.
+**My board isn't showing.** Three things all have to be true: a bingo event
+is currently running, you're assigned to a team, and the "Show bingo board"
+toggle is on. If you were just added to a team, it can take up to a minute to
+notice; if it still hasn't shown up, try restarting the client.
+
+**My drop didn't submit.** Check that an event is actually active, drops
+made before an event officially starts aren't accepted on purpose, so
+nothing counts early. Also make sure your plugin key is still valid (see
+Setup above).
+
+**A command isn't replying.** Make sure "Clan chat commands" is enabled in
+the plugin's settings, and that the name you typed is spelled the way it
+appears in-game.
+
+## Privacy: what actually gets sent
+
+- **Bingo proof**: only while an event is running, your key is set, and the
+  drop matches one of your own team's tiles. A screenshot plus the item and
+  tile involved is sent to the clan site. The plugin only reacts to loot you
+  actually receive in-game (a kill, a chest, a casket, a raid reward);
+  buying an item, withdrawing it from the bank, or trading for one does
+  nothing, so nothing you didn't earn in-game can ever be submitted. Every
+  submission still goes through an admin's manual review before it counts.
+- **`!rank` / `!verify` / `!needed`**: sends the looked-up name to the clan
+  site. No plugin key involved, it's the same public rank data already
+  visible to anyone on the site's Clan Rankings page.
+- **`!live`**: sends nothing about you at all, just asks which clan Twitch
+  channels are currently live.
+
+Which item drops count toward which tiles is configured by clan admins on
+the site, not by you.
