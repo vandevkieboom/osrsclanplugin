@@ -42,6 +42,38 @@ cover.
 
 ## Request volume: one poll per tick, only while logged in
 
+> **2026-09-06: the tick is now genuinely one request, and it no longer
+> reaches a database.** Two changes on the same day, both worth knowing before
+> touching `scheduledRefresh`:
+>
+> 1. **`checkBoardState()` is gone.** It ran as the second half of every tick,
+>    asking `GET /api/board?resource=status` whether the board had changed -
+>    which `onPolled` had *already* been told on the same tick, from the same
+>    `board_config` row. Its own comment claimed it "isn't adding any load
+>    beyond what a participant's poll() already costs"; that was simply wrong.
+>    A separate URL is a separate CDN cache entry, so it was a separate origin
+>    invocation and a separate database read every minute per participant,
+>    doubling the rate at which participants woke Neon's compute for
+>    information they already had. `fetchBoardState`/`BoardState` were removed
+>    from `BingoApiClient` along with it. If you find yourself adding a second
+>    periodic request, check first whether the poll can just carry the field.
+>
+> 2. **The site answers the poll from a CDN file, not Postgres.** See the site
+>    repo's "The board marker" section. Nothing changes on this side - same
+>    endpoint, same JSON, same cadence - but it means poll frequency is no
+>    longer what decides whether the database gets to sleep, so tuning it is
+>    no longer the lever it used to be. The lever now is *board fetches*, which
+>    `shouldRefreshBoard` already gates on the panel being visible.
+>
+> Also: a bingo going active now clears `lastMyTeamFetchAt`, forcing every
+> online client to re-check team membership on the next poll. Team membership
+> is only ever checked while bingo is active, so at the moment the switch is
+> flipped every client is holding whatever it last knew - which, for the normal
+> "build the teams, then flip the switch" run-up, is "no team", with the nav
+> icon hidden on that basis. Without the reset the icon did not appear until
+> the 30-minute throttle happened to lapse, and the only fix a member could
+> find was restarting the client. That is exactly what was hit in real testing.
+
 > **Superseded 2026-09-02** - the merge-three-requests-into-one fix below
 > shipped first and helped, but the database kept burning compute 24/7
 > regardless (Neon has no way to tell "cheap ping" traffic from anything
@@ -204,6 +236,21 @@ isn't known synchronously, so the icon simply doesn't appear until
 not a bug).
 
 ## Broadcast and live-stream notifications: removed entirely
+
+> **Correction, 2026-09-06.** The Neon reasoning below is right about
+> *broadcast* and wrong about *live streams*. The site's `api/twitch-live.ts`
+> contains no database calls at all - it asks Twitch and returns the answer -
+> so live-stream polling could not have kept Neon's compute awake. Broadcast
+> was the half that read `board_config` out of Postgres every tick. What
+> live-stream polling actually spent was **Vercel edge requests** (1M/month on
+> Hobby; 100+ installs at one check a minute is ~4.3M), which is a real reason
+> not to bring it back, but a different one. Don't cite Neon against it.
+>
+> Note also that **`!live` still works** - `onLiveCommand` was never removed.
+> Only the unprompted every-minute notification was. That contrast is the
+> transferable lesson here: on-demand costs one request when somebody asks;
+> on-a-timer costs ~1,440/day/member whether or not anyone cares. Reach for
+> the former whenever a feature can be shaped that way.
 
 2026-09-02, on top of the merge-into-one-request fix above. Even after that
 fix, Neon compute usage stayed close to 24/7: its free-tier auto-suspend

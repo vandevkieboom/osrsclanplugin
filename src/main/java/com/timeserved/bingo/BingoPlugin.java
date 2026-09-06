@@ -425,58 +425,24 @@ public class BingoPlugin extends Plugin
 	public void scheduledRefresh()
 	{
 		poll();
-		checkBoardState();
 	}
 
-	/**
-	 * The fast half of the tick, and the only part that is bingo-specific.
+	/*
+	 * checkBoardState() used to run here as a second half of this tick: a
+	 * participant-only call to GET /api/board?resource=status asking "has the
+	 * board changed?". It was removed because it was a duplicate request for
+	 * an answer poll() had already fetched on the same tick - onPolled reads
+	 * boardChangedAt from the same board_config row and does the same three
+	 * things with it (refresh the board, retry pending submissions, clear the
+	 * failure backoff).
 	 *
-	 * <p>Runs every minute, but only for members who are actually competing -
-	 * on a team, with an event running - and asks one tiny question ("has the
-	 * board changed?"). Now that the main poll (see poll()) only ever runs
-	 * for participants anyway and already speeds up to the same cadence while
-	 * an event is active, this is largely redundant with it rather than a
-	 * cost-saving split; kept as-is since it isn't adding any load beyond
-	 * what a participant's poll() already costs, not because it's still
-	 * strictly necessary.
+	 * Its own comment claimed it "isn't adding any load beyond what a
+	 * participant's poll() already costs", and that was simply wrong: a
+	 * separate URL is a separate CDN cache entry, so it was a separate origin
+	 * invocation and a separate database read every single time. During an
+	 * event it doubled the rate at which participants woke Neon's compute, for
+	 * information they already had.
 	 */
-	private void checkBoardState()
-	{
-		if (!bingoActive || myTeamId == null || client.getGameState() != GameState.LOGGED_IN)
-		{
-			return;
-		}
-		if (System.currentTimeMillis() < nextPollAllowedAt)
-		{
-			return;
-		}
-
-		api.fetchBoardState(
-			state -> {
-				// Shares its success/failure signal with poll() below on
-				// purpose: whichever of the two requests failed, an outage is
-				// an outage, and both must back off together. A participant
-				// otherwise keeps hammering this endpoint every minute with no
-				// backoff at all while everyone else correctly quiets down -
-				// exactly the pile-on the backoff exists to prevent, and worse
-				// here since participants are already the most frequent
-				// callers.
-				consecutivePollFailures = 0;
-				nextPollAllowedAt = 0L;
-
-				bingoActive = state.bingoActive;
-				if (!state.bingoActive)
-				{
-					return;
-				}
-				if (shouldRefreshBoard(state.boardChangedAt))
-				{
-					refreshBoard(state.boardChangedAt);
-				}
-				retryPendingSubmissions();
-			},
-			this::onPollFailed);
-	}
 
 	private volatile boolean panelWasVisible;
 
@@ -670,7 +636,24 @@ public class BingoPlugin extends Plugin
 			return;
 		}
 
+		boolean wasActive = bingoActive;
 		bingoActive = result.bingoActive;
+
+		// An event just started. Team membership is only ever checked while
+		// bingo is active (see maybeRefreshMyTeam), so at this exact moment
+		// every online client is holding whatever it last knew - which for the
+		// normal run-up to an event ("build the teams, then flip the switch")
+		// is "no team", and the bingo nav icon is hidden on that basis. Without
+		// this the icon would not appear until the throttle happened to lapse,
+		// leaving members who *are* on a team unable to see the board and no
+		// obvious fix but restarting the client. Clearing the marker makes the
+		// very next poll re-ask, so flipping the switch reaches everyone within
+		// about a minute, which is what the 30-minutes-before-start routine
+		// assumes. Costs one request per client per event.
+		if (bingoActive && !wasActive)
+		{
+			lastMyTeamFetchAt = 0L;
+		}
 
 		if (bingoActive)
 		{
@@ -811,10 +794,9 @@ public class BingoPlugin extends Plugin
 	}
 
 	/**
-	 * Adopts the cadence the site asks for. One number, the same for every
-	 * member of the clan - announcements are a clan feature and must not
-	 * arrive sooner for some people than others because of a bingo. Board
-	 * state is checked separately, see checkBoardState.
+	 * Adopts the cadence the site asks for - fast while an event is running,
+	 * slow otherwise. The server decides rather than the plugin, so it can be
+	 * retuned mid-month without waiting for installs to update.
 	 */
 	private void applyPollCadence(BingoApiClient.PollResponse result)
 	{

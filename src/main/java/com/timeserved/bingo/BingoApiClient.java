@@ -321,77 +321,15 @@ public class BingoApiClient
 		public boolean degraded;
 	}
 
-	/** Just the board's change marker - mirrors GET /api/board?resource=status. */
-	public static class BoardState
-	{
-		public boolean bingoActive;
-
-		/** Opaque; compare against the value the board was last fetched with. */
-		public String boardChangedAt;
-	}
-
-	/**
-	 * Asks only whether the board has changed.
-	 *
-	 * <p>Deliberately separate from {@link #fetchPluginPoll}. Board state is the
-	 * one thing that needs to be checked often, and only by the handful of
-	 * members actually competing; clan announcements need to reach everybody at
-	 * the same speed. Carrying both on one request meant the announcement rate
-	 * was set by whoever needed the board most, so members in a bingo team
-	 * heard about a stream going live sooner than everyone else - a clan-wide
-	 * feature behaving differently based on something completely unrelated to
-	 * it.
-	 *
-	 * <p>Tiny and unauthenticated, so the whole clan shares one cached copy.
+	/*
+	 * fetchBoardState() / BoardState used to live here, wrapping
+	 * GET /api/board?resource=status. Both were removed along with their only
+	 * caller (BingoPlugin#checkBoardState): that endpoint answers from the same
+	 * board_config row as /api/plugin-poll and carries the same bingoActive and
+	 * boardChangedAt fields, so asking it on the same tick was a second CDN
+	 * cache entry, a second origin invocation and a second database read for an
+	 * answer the poll had already delivered.
 	 */
-	public void fetchBoardState(Consumer<BoardState> onSuccess, Consumer<String> onError)
-	{
-		HttpUrl base = HttpUrl.parse(BASE_URL + "/api/board");
-		if (base == null)
-		{
-			onError.accept("Invalid API base URL");
-			return;
-		}
-
-		HttpUrl url = base.newBuilder().addQueryParameter("resource", "status").build();
-		Request request = new Request.Builder().url(url).get().build();
-
-		httpClient.newCall(request).enqueue(new Callback()
-		{
-			@Override
-			public void onFailure(Call call, IOException e)
-			{
-				log.debug("Failed to check board state", e);
-				onError.accept("Could not reach the clan site");
-			}
-
-			@Override
-			public void onResponse(Call call, Response response)
-			{
-				try (Response closeable = response)
-				{
-					ResponseBody body = closeable.body();
-					if (!closeable.isSuccessful() || body == null)
-					{
-						onError.accept(describeFailure(closeable, parseErrorBody(body)));
-						return;
-					}
-					BoardState parsed = gson.fromJson(body.charStream(), BoardState.class);
-					if (parsed == null)
-					{
-						onError.accept("The clan site returned an empty response");
-						return;
-					}
-					onSuccess.accept(parsed);
-				}
-				catch (JsonSyntaxException e)
-				{
-					log.debug("Malformed board state response", e);
-					onError.accept("The clan site returned an unexpected response");
-				}
-			}
-		});
-	}
 
 	/**
 	 * Uploads a screenshot as proof for a tile. The server re-checks that the
