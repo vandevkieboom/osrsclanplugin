@@ -178,9 +178,10 @@ public class BingoPanelTest
 
 		BingoPanel[] holder = new BingoPanel[1];
 		SwingUtilities.invokeAndWait(() -> {
-			// null ItemManager is safe here: none of the fixture tiles set itemIds, so
-			// loadIconInto() returns before ever touching it.
-			BingoPanel panel = new BingoPanel(null);
+			// null ItemManager/SpriteManager are safe here: none of the fixture tiles set
+			// itemIds, and loadIconInto()'s xp-goal branch (the fixture's "Strength XP" tile
+			// takes it) is guarded to skip a null SpriteManager rather than touch it.
+			BingoPanel panel = new BingoPanel(null, null);
 			panel.refresh(board);
 			holder[0] = panel;
 		});
@@ -255,9 +256,9 @@ public class BingoPanelTest
 
 		BingoPanel[] holder = new BingoPanel[1];
 		SwingUtilities.invokeAndWait(() -> {
-			// null ItemManager is safe here: none of the fixture tiles set itemIds, so
-			// loadIconInto() returns before ever touching it.
-			BingoPanel panel = new BingoPanel(null);
+			// null ItemManager/SpriteManager are safe here: none of the fixture tiles set
+			// itemIds or an xp/kc goal, so loadIconInto() returns before ever touching either.
+			BingoPanel panel = new BingoPanel(null, null);
 			panel.refresh(board);
 			holder[0] = panel;
 		});

@@ -18,8 +18,10 @@ import java.awt.RenderingHints;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import javax.inject.Inject;
@@ -36,7 +38,9 @@ import javax.swing.SwingUtilities;
 import javax.swing.Timer;
 import javax.swing.border.EmptyBorder;
 import lombok.extern.slf4j.Slf4j;
+import net.runelite.api.SpriteID;
 import net.runelite.client.game.ItemManager;
+import net.runelite.client.game.SpriteManager;
 import net.runelite.client.ui.ColorScheme;
 import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.PluginPanel;
@@ -66,10 +70,55 @@ public class BingoPanel extends PluginPanel
 	private static final int CONTENT_WIDTH =
 		PluginPanel.PANEL_WIDTH - PluginPanel.SCROLLBAR_WIDTH - CONTENT_PADDING * 2;
 
+	/**
+	 * Hiscores skill key (lowercased, as an admin types it into `goalKey` - see tiles.goal_key on the
+	 * site) to the client's own built-in skill sprite id. Backs the icon for an xp-goal tile: those
+	 * tiles have no natural item, so unlike everything else in {@link #loadIconInto} this never touches
+	 * {@code itemManager} at all. Includes the same spelling aliases the site's own WOM lookup tolerates
+	 * (runecraft/runecrafting, defence/defense) so the two sides never disagree on what an admin typed.
+	 */
+	private static final Map<String, Integer> SKILL_SPRITES = buildSkillSprites();
+
+	private static Map<String, Integer> buildSkillSprites()
+	{
+		Map<String, Integer> m = new HashMap<>();
+		m.put("attack", SpriteID.SKILL_ATTACK);
+		m.put("strength", SpriteID.SKILL_STRENGTH);
+		m.put("defence", SpriteID.SKILL_DEFENCE);
+		m.put("defense", SpriteID.SKILL_DEFENCE);
+		m.put("ranged", SpriteID.SKILL_RANGED);
+		m.put("prayer", SpriteID.SKILL_PRAYER);
+		m.put("magic", SpriteID.SKILL_MAGIC);
+		m.put("hitpoints", SpriteID.SKILL_HITPOINTS);
+		m.put("agility", SpriteID.SKILL_AGILITY);
+		m.put("herblore", SpriteID.SKILL_HERBLORE);
+		m.put("thieving", SpriteID.SKILL_THIEVING);
+		m.put("crafting", SpriteID.SKILL_CRAFTING);
+		m.put("fletching", SpriteID.SKILL_FLETCHING);
+		m.put("mining", SpriteID.SKILL_MINING);
+		m.put("smithing", SpriteID.SKILL_SMITHING);
+		m.put("fishing", SpriteID.SKILL_FISHING);
+		m.put("cooking", SpriteID.SKILL_COOKING);
+		m.put("firemaking", SpriteID.SKILL_FIREMAKING);
+		m.put("woodcutting", SpriteID.SKILL_WOODCUTTING);
+		m.put("runecraft", SpriteID.SKILL_RUNECRAFT);
+		m.put("runecrafting", SpriteID.SKILL_RUNECRAFT);
+		m.put("slayer", SpriteID.SKILL_SLAYER);
+		m.put("farming", SpriteID.SKILL_FARMING);
+		m.put("hunter", SpriteID.SKILL_HUNTER);
+		m.put("construction", SpriteID.SKILL_CONSTRUCTION);
+		m.put("overall", SpriteID.SKILL_TOTAL);
+		return Collections.unmodifiableMap(m);
+	}
+
 	private final ItemManager itemManager;
+	private final SpriteManager spriteManager;
 	/** Scaled tile icons, keyed by item id. Item sprites come from the client's own game cache via
 	 * ItemManager, not a URL from the API response - see BingoApiClient's class doc for why. */
 	private final Map<Integer, ImageIcon> iconCache = new ConcurrentHashMap<>();
+	/** Scaled skill-sprite icons for xp-goal tiles, keyed by sprite id - kept separate from
+	 * {@link #iconCache} (item ids) since the two id spaces aren't related and shouldn't collide. */
+	private final Map<Integer, ImageIcon> spriteIconCache = new ConcurrentHashMap<>();
 	/** Which collapsible sections are open, keyed by a short section id. Survives refresh()'s full
 	 * teardown-and-rebuild - otherwise every board poll would silently re-expand anything you'd closed. */
 	private final Map<String, Boolean> sectionExpanded = new HashMap<>();
@@ -82,10 +131,11 @@ public class BingoPanel extends PluginPanel
 	private volatile long lastSyncedAt;
 
 	@Inject
-	public BingoPanel(ItemManager itemManager)
+	public BingoPanel(ItemManager itemManager, SpriteManager spriteManager)
 	{
 		super(false);
 		this.itemManager = itemManager;
+		this.spriteManager = spriteManager;
 
 		setBackground(ColorScheme.DARK_GRAY_COLOR);
 		setLayout(new BorderLayout());
@@ -288,7 +338,7 @@ public class BingoPanel extends PluginPanel
 					: TileCell.State.EMPTY;
 				TileCell cell = new TileCell(state);
 				cell.setToolTipText(tile.name);
-				loadIconInto(cell, tile.getItemIds());
+				loadIconInto(cell, tile);
 				grid.add(cell);
 			}
 			body.add(grid);
@@ -307,17 +357,43 @@ public class BingoPanel extends PluginPanel
 	}
 
 	/**
-	 * Icons come from the client's own item sprite cache via ItemManager, keyed by item id - not a URL
-	 * taken from the board API response (see BingoApiClient's class doc for why that's off the table).
-	 * Goal tiles have no item ids and are left blank here; they render their own progress elsewhere.
+	 * Picks the tile's icon, in priority order: a built-in skill sprite for an xp-goal tile (which has
+	 * no natural item), then the first entry in {@code itemIds} (today's long-standing default). A
+	 * kc-goal tile with no item ids is left blank - there's no client-side "boss sprite" to fall back
+	 * on, unlike skills. Wanting a specific item's picture instead of whatever's first in the list is
+	 * just a matter of listing that item first - no separate override field, no second thing that can
+	 * fall out of sync between the website and this client.
+	 *
+	 * <p>Icons never come from a URL in the API response (see BingoApiClient's class doc for why
+	 * that's off the table) - only the client's own item/sprite caches, via ItemManager/SpriteManager.
 	 */
-	private void loadIconInto(TileCell cell, List<Integer> itemIds)
+	private void loadIconInto(TileCell cell, BoardResponse.Tile tile)
 	{
-		if (itemIds.isEmpty())
+		if (tile.isXpGoal() && spriteManager != null)
 		{
-			return;
+			// Locale.ROOT deliberately, not the machine's default locale: on a
+			// Turkish/Azeri client, no-arg toLowerCase() turns "I" into a
+			// dotless "ı" instead of "i", which would miss this map for a key
+			// like "FISHING" even though the website's (locale-independent)
+			// JS toLowerCase() would still match it - the exact two-sides-
+			// disagree failure this shared map exists to prevent.
+			Integer spriteId = SKILL_SPRITES.get(
+				tile.goalKey == null ? "" : tile.goalKey.trim().toLowerCase(Locale.ROOT));
+			if (spriteId != null)
+			{
+				loadSpriteIconInto(cell, spriteId);
+				return;
+			}
 		}
-		int itemId = itemIds.get(0);
+		List<Integer> itemIds = tile.getItemIds();
+		if (!itemIds.isEmpty())
+		{
+			loadItemIconInto(cell, itemIds.get(0));
+		}
+	}
+
+	private void loadItemIconInto(TileCell cell, int itemId)
+	{
 		ImageIcon cached = iconCache.get(itemId);
 		if (cached != null)
 		{
@@ -329,6 +405,26 @@ public class BingoPanel extends PluginPanel
 			Image scaled = image.getScaledInstance(TILE_ICON_PX, TILE_ICON_PX, Image.SCALE_SMOOTH);
 			ImageIcon icon = new ImageIcon(scaled);
 			iconCache.put(itemId, icon);
+			SwingUtilities.invokeLater(() -> cell.setIcon(icon));
+		});
+	}
+
+	private void loadSpriteIconInto(TileCell cell, int spriteId)
+	{
+		ImageIcon cached = spriteIconCache.get(spriteId);
+		if (cached != null)
+		{
+			cell.setIcon(cached);
+			return;
+		}
+		spriteManager.getSpriteAsync(spriteId, 0, image -> {
+			if (image == null)
+			{
+				return;
+			}
+			Image scaled = image.getScaledInstance(TILE_ICON_PX, TILE_ICON_PX, Image.SCALE_SMOOTH);
+			ImageIcon icon = new ImageIcon(scaled);
+			spriteIconCache.put(spriteId, icon);
 			SwingUtilities.invokeLater(() -> cell.setIcon(icon));
 		});
 	}
