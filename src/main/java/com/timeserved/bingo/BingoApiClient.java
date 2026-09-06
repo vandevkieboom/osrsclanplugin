@@ -215,16 +215,20 @@ public class BingoApiClient
 	}
 
 	/**
-	 * Everything the plugin's once-a-minute tick needs, in one response.
+	 * Everything a bingo participant's once-a-minute tick needs, in one
+	 * response.
 	 *
-	 * <p>This used to be three separate requests fired on the same tick -
-	 * bingo status, clan broadcast, and live streams - which is three
-	 * requests per minute per online member, forever, or roughly 4,300 per
-	 * member per day before anyone does anything at all. Across a clan this
-	 * size that was the single biggest source of load on the site by a wide
-	 * margin, and it exhausted the hosting plan's quotas. Merging them costs
-	 * nothing in freshness (they were always fetched together anyway) and
-	 * removes two thirds of the plugin's total request volume outright.
+	 * <p>This used to also carry clan broadcast and live-stream answers,
+	 * merged in from what were three separate requests fired on the same
+	 * tick, for every online member regardless of bingo participation -
+	 * roughly 4,300 requests per member per day before anyone did anything at
+	 * all, and across a clan this size that was the single biggest source of
+	 * load on the site by a wide margin, exhausting the hosting plan's quotas.
+	 * Broadcast and live-stream notifications were later removed from the
+	 * plugin entirely rather than kept merged in, since the only remaining
+	 * caller of this endpoint is someone with a plugin key set - i.e. an
+	 * actual bingo participant - and neither feature had anything to do with
+	 * bingo. See BingoPlugin#hasAnythingToPollFor.
 	 *
 	 * <p>Deliberately unauthenticated and identical for every caller, so the
 	 * site can serve nearly all of these from its CDN without running any
@@ -308,12 +312,6 @@ public class BingoApiClient
 		 */
 		public String boardChangedAt;
 
-		/** The current admin broadcast, or null when none has ever been sent. */
-		public Broadcast broadcast;
-
-		/** Clan members streaming right now - never null in practice, but check anyway. */
-		public List<LiveStream> streams;
-
 		/**
 		 * True when the site answered from a cached copy because its database
 		 * was unreachable. The values above are then last-known rather than
@@ -321,15 +319,6 @@ public class BingoApiClient
 		 * they can't trust.
 		 */
 		public boolean degraded;
-	}
-
-	/** The current admin broadcast - mirrors the `broadcast` object in GET /api/plugin-poll. */
-	public static class Broadcast
-	{
-		public String message;
-
-		/** ISO-8601 timestamp, used to tell a new broadcast from one already shown. */
-		public String updatedAt;
 	}
 
 	/** Just the board's change marker - mirrors GET /api/board?resource=status. */

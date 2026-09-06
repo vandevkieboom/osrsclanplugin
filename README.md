@@ -1,10 +1,12 @@
 # Time Served
 
-A RuneLite plugin for the Time Served clan: general clan tooling (chat
-commands, live-stream/broadcast notifications) plus automatic bingo tile
-proof submission. When you receive a drop that matches one of your
+A RuneLite plugin for the Time Served clan: chat commands plus automatic
+bingo tile proof submission. When you receive a drop that matches one of your
 team's bingo tiles, it screenshots your client and submits it as proof to the
 clan site automatically, so nobody has to take and upload screenshots by hand.
+Members who've never set a plugin key make no background requests to the
+clan site at all, ever. Members who have one check in only occasionally
+outside an active event, and more often while one's running.
 
 ## Features
 
@@ -19,13 +21,10 @@ clan site automatically, so nobody has to take and upload screenshots by hand.
   Corrupted Gauntlet kc, or a Twisted Bow.
 - **`!needed [name]`** - what's missing for the next rank tier up.
 - **`!live`** - which clan members are currently streaming on Twitch.
-- **Live-stream and broadcast notifications** - optional chat messages when
-  a clan member goes live, or an admin posts a broadcast from the site. Both
-  can be toggled independently; if you're not interested in either and don't
-  have a plugin key set, the plugin makes no background requests at all.
 - **Sidebar panel** - your team's board, goal-tile progress, and a clan
-  leaderboard, with collapsible sections. Can be hidden entirely (nav icon
-  and all) via the **"Show bingo board"** toggle.
+  leaderboard, with collapsible sections. Only appears at all while you're on
+  a bingo team - there's nothing in it for anyone else. Can be hidden
+  entirely via the **"Show bingo board"** toggle even while on a team.
 - **On-screen codeword overlay** - an optional, draggable overlay showing an
   admin-announced verification codeword (and, if enabled, a live timestamp),
   matching the Wise Old Man plugin's overlay style. It has to actually be on
@@ -39,8 +38,8 @@ clan site automatically, so nobody has to take and upload screenshots by hand.
   bingo verification depend on it.
 
 All chat commands can be turned off entirely with the **"Clan chat commands"**
-config toggle. Notification message colors (broadcasts/live-stream, and bingo
-submissions separately) are configurable too.
+config toggle. Notification message colors (for the sync reminder/command
+usage messages, and bingo submissions separately) are configurable too.
 
 ## Kill-count and skill-XP tiles need no action from you
 
@@ -65,10 +64,8 @@ the site has already computed.
   default, or whichever name was typed) to `https://timeserved.vercel.app`.
   No plugin key involved - this is the same public data already visible on
   the clan site's Clan Rankings page to anyone, logged in or not.
-- **`!live` / live-stream notifications**: no RSN sent at all - just asks the
-  clan site which of its configured Twitch channels are currently live.
-- **Broadcast notifications**: polls the clan site for the latest
-  admin-posted message; sends nothing.
+- **`!live`**: no RSN sent at all - just asks the clan site which of its
+  configured Twitch channels are currently live, on demand when typed.
 
 ## Setup
 

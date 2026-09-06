@@ -13,10 +13,8 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ScheduledExecutorService;
@@ -146,15 +144,6 @@ public class BingoPlugin extends Plugin
 	/** Guards registerCommands()/unregisterCommands() so either is safe to call more than once in a row. */
 	private boolean commandsRegistered;
 
-	/**
-	 * Twitch usernames seen live on the last background check, so "Notify me
-	 * when clan members go live" only announces new arrivals rather than
-	 * re-announcing everyone who was already live on every check. Null until
-	 * the first check completes, which seeds this silently instead of
-	 * announcing everyone already live at plugin startup as "new".
-	 */
-	private volatile Set<String> previouslyLiveUsernames;
-
 	/** Sync-reminder fires at most once per plugin session, on whichever outcome comes back first. */
 	private boolean checkedRuneProfileSync;
 
@@ -258,10 +247,9 @@ public class BingoPlugin extends Plugin
 			.priority(5)
 			.panel(bingoPanel)
 			.build();
-		if (config.showSidebar())
-		{
-			clientToolbar.addNavigation(bingoNavButton);
-		}
+		// Not added here unconditionally - see updateNavVisibility(). Team
+		// membership isn't known yet at this point (refreshMyTeam() below is
+		// asynchronous), so the icon only appears once that resolves.
 
 		List<PendingSubmissionStore.PendingItem> restored = pendingStore.loadAll();
 		if (!restored.isEmpty())
@@ -316,7 +304,6 @@ public class BingoPlugin extends Plugin
 		tilesByItemId.clear();
 		recentAttempts.clear();
 		retryQueue.clear();
-		previouslyLiveUsernames = null;
 		checkedRuneProfileSync = false;
 		bingoActive = true;
 		lastBoardStamp = null;
@@ -391,14 +378,7 @@ public class BingoPlugin extends Plugin
 		}
 		else if ("showSidebar".equals(event.getKey()))
 		{
-			if (config.showSidebar())
-			{
-				clientToolbar.addNavigation(bingoNavButton);
-			}
-			else
-			{
-				clientToolbar.removeNavigation(bingoNavButton);
-			}
+			updateNavVisibility();
 		}
 		else if ("enableClanCommands".equals(event.getKey()))
 		{
@@ -414,30 +394,32 @@ public class BingoPlugin extends Plugin
 	}
 
 	/**
-	 * The plugin's whole periodic workload: one request, once a minute, and
-	 * only while actually logged in.
+	 * The plugin's whole periodic workload: one request, once a minute, only
+	 * while actually logged in, and only for members who have a plugin key
+	 * set at all (see hasAnythingToPollFor).
 	 *
 	 * <p>This used to be three requests every minute - bingo status, clan
 	 * broadcast, live streams - fired unconditionally for as long as the
-	 * client was open, logged in or not. That is roughly 4,300 requests per
-	 * member per day doing nothing, and across the clan it was enough to
-	 * exhaust the site's hosting quotas outright, at which point the site
-	 * started failing for everyone. Two changes fix that without making
-	 * anything slower to arrive:
+	 * client was open, logged in or not, for every install regardless of
+	 * whether they had anything to do with bingo. That is roughly 4,300
+	 * requests per member per day doing nothing, and across the clan it was
+	 * enough to exhaust the site's hosting quotas outright, at which point
+	 * the site started failing for everyone. Broadcast and live-stream
+	 * notifications were later removed entirely rather than just merged, so
+	 * the only thing left to poll for is bingo state, and only bingo
+	 * participants have any reason to ask for it - between events, or for
+	 * the several hundred members who just use the chat commands, this tick
+	 * makes zero requests at all.
 	 *
-	 * <ul>
-	 *   <li>The three requests became one (see
-	 *       BingoApiClient#fetchPluginPoll). They were always fetched on the
-	 *       same tick, so nothing waits any longer than before.</li>
-	 *   <li>Nothing runs while logged out. Every one of these results is
-	 *       delivered as a game chat message or a board the player is looking
-	 *       at in-game, so polling at the login screen was spending requests
-	 *       on notifications that had nowhere to go.</li>
-	 * </ul>
+	 * <p>Nothing runs while logged out either: every result this could
+	 * deliver is a game chat message or a board the player is looking at
+	 * in-game, so polling at the login screen would spend requests on
+	 * nothing.
 	 *
 	 * <p>The tick itself is deliberately still one minute: the point was
-	 * never to make members wait longer for a rank, a broadcast or a board
-	 * update, it was to stop paying for the same three answers over and over.
+	 * never to make a participant wait longer for a board update, it was to
+	 * stop the whole clan paying for answers nobody but a participant ever
+	 * needed.
 	 */
 	@Schedule(period = 1, unit = ChronoUnit.MINUTES, asynchronous = true)
 	public void scheduledRefresh()
@@ -450,14 +432,13 @@ public class BingoPlugin extends Plugin
 	 * The fast half of the tick, and the only part that is bingo-specific.
 	 *
 	 * <p>Runs every minute, but only for members who are actually competing -
-	 * on a team, with an event running. It asks one tiny question ("has the
-	 * board changed?") rather than riding along on the announcement poll,
-	 * because that coupling used to set the announcement rate by whoever needed
-	 * the board most: members in a bingo team heard about a stream going live
-	 * or an admin's message sooner than the rest of the clan, purely because
-	 * their plugin happened to be talking to the site more often. Announcements
-	 * belong to everybody and now travel at one speed for everybody; this is
-	 * what actually needed to be quick, for the few people it applies to.
+	 * on a team, with an event running - and asks one tiny question ("has the
+	 * board changed?"). Now that the main poll (see poll()) only ever runs
+	 * for participants anyway and already speeds up to the same cadence while
+	 * an event is active, this is largely redundant with it rather than a
+	 * cost-saving split; kept as-is since it isn't adding any load beyond
+	 * what a participant's poll() already costs, not because it's still
+	 * strictly necessary.
 	 */
 	private void checkBoardState()
 	{
@@ -654,23 +635,18 @@ public class BingoPlugin extends Plugin
 	/**
 	 * Whether this install has any reason to be talking to the site on a timer.
 	 *
-	 * <p>The periodic poll exists to deliver exactly three things: a live-stream
-	 * notice, an admin broadcast, and (for bingo participants) the state of the
-	 * board. Turn the first two off and hold no plugin key, and there is
-	 * nothing left for it to tell you - so it should say nothing rather than
-	 * ask once a minute forever and discard the answer, which is what it used
-	 * to do. The chat commands are unaffected either way: they are sent when
-	 * typed, and never poll.
-	 *
-	 * <p>A plugin key counts as a reason on its own, even with both
-	 * notifications off, because it is what a bingo participant has - and they
-	 * need to find out when an event starts.
+	 * <p>Live-stream notifications and admin broadcasts were removed entirely
+	 * - the periodic poll now exists purely to deliver bingo state to actual
+	 * participants. A plugin key is what a bingo participant has, so it is the
+	 * only reason left to poll at all: nobody without one has anything for
+	 * this tick to tell them, so between events (or for the several hundred
+	 * members who just use the chat commands) this install makes zero
+	 * background requests. The chat commands are unaffected either way: they
+	 * are sent when typed, and never poll.
 	 */
 	private boolean hasAnythingToPollFor()
 	{
-		return config.notifyLiveStreams()
-			|| config.notifyBroadcasts()
-			|| !config.apiKey().trim().isEmpty();
+		return !config.apiKey().trim().isEmpty();
 	}
 
 	private void onPolled(BingoApiClient.PollResponse result)
@@ -686,9 +662,8 @@ public class BingoPlugin extends Plugin
 		applyPollCadence(result);
 
 		// The site couldn't reach its own database and answered from a cached
-		// copy. Acting on those values could announce a stale broadcast or,
-		// worse, decide an event has ended when it hasn't. Sitting this one out
-		// costs at most one poll interval.
+		// copy. Acting on that value could mean deciding an event has ended
+		// when it hasn't. Sitting this one out costs at most one poll interval.
 		if (result.degraded)
 		{
 			log.debug("Clan site answered in degraded mode; skipping this tick");
@@ -706,9 +681,6 @@ public class BingoPlugin extends Plugin
 			}
 			retryPendingSubmissions();
 		}
-
-		handleStreams(result.streams);
-		handleBroadcast(result.broadcast);
 	}
 
 	/**
@@ -786,6 +758,7 @@ public class BingoPlugin extends Plugin
 		if (apiKey.isEmpty())
 		{
 			myTeamId = null;
+			updateNavVisibility();
 			return;
 		}
 		lastMyTeamFetchAt = System.currentTimeMillis();
@@ -794,6 +767,7 @@ public class BingoPlugin extends Plugin
 			result -> {
 				String previous = myTeamId;
 				myTeamId = result.teamId;
+				updateNavVisibility();
 				// Someone just put on a team, or moved to another one, is
 				// looking at the wrong half of the board until it is
 				// re-rendered - and the change marker cannot help, because the
@@ -814,6 +788,26 @@ public class BingoPlugin extends Plugin
 				}
 			},
 			error -> log.debug("Failed to fetch team membership: {}", error));
+	}
+
+	/**
+	 * Shows the bingo nav icon only for members who are actually on a team.
+	 * Someone with a plugin key but no team could still open the panel and
+	 * see the clan-wide standings, which cost a real board fetch for
+	 * information that's already fully public on the website - not worth it
+	 * for someone who isn't playing. Called whenever team membership or the
+	 * "Show bingo board" toggle change.
+	 */
+	private void updateNavVisibility()
+	{
+		if (config.showSidebar() && myTeamId != null)
+		{
+			clientToolbar.addNavigation(bingoNavButton);
+		}
+		else
+		{
+			clientToolbar.removeNavigation(bingoNavButton);
+		}
 	}
 
 	/**
@@ -1456,43 +1450,6 @@ public class BingoPlugin extends Plugin
 	}
 
 	/**
-	 * Announces clan members who have started streaming since the last check.
-	 *
-	 * <p>Takes the list from the combined poll rather than fetching it - see
-	 * scheduledRefresh. previouslyLiveUsernames stays null until the first
-	 * result arrives so that logging in doesn't announce everyone already
-	 * live as if they had just started.
-	 */
-	private void handleStreams(List<BingoApiClient.LiveStream> streams)
-	{
-		if (streams == null || !config.notifyLiveStreams())
-		{
-			return;
-		}
-
-		Set<String> nowLive = new HashSet<>();
-		for (BingoApiClient.LiveStream stream : streams)
-		{
-			nowLive.add(stream.username);
-		}
-
-		Set<String> previous = previouslyLiveUsernames;
-		previouslyLiveUsernames = nowLive;
-		if (previous == null)
-		{
-			return;
-		}
-
-		for (BingoApiClient.LiveStream stream : streams)
-		{
-			if (!previous.contains(stream.username))
-			{
-				sendChatMessage(stream.displayName + " just went live", config.clanMessageColor());
-			}
-		}
-	}
-
-	/**
 	 * Backs the "Remind me to sync RuneProfile" toggle. Only ever detects
 	 * "never set up on RuneProfile at all" (a 404 from the site, see
 	 * BingoApiClient#lookupRank's reason field) - there's no confirmed way
@@ -1557,53 +1514,4 @@ public class BingoPlugin extends Plugin
 			});
 	}
 
-	private static final String LAST_SEEN_BROADCAST_KEY = "lastSeenBroadcast";
-
-	/**
-	 * Shows the latest one-off message an admin has pushed out from the
-	 * site's Board Config panel, once per message.
-	 *
-	 * <p>Takes the broadcast from the combined poll rather than fetching it -
-	 * see scheduledRefresh. The last-shown timestamp is persisted via
-	 * ConfigManager (rather than kept in memory like checkedRuneProfileSync)
-	 * since a broadcast can happen at any point during play, not just once
-	 * per session - an in-memory flag would re-show the same message after
-	 * every client restart.
-	 */
-	private void handleBroadcast(BingoApiClient.Broadcast broadcast)
-	{
-		if (broadcast == null
-			|| broadcast.message == null
-			|| broadcast.message.isEmpty()
-			|| broadcast.updatedAt == null)
-		{
-			return;
-		}
-
-		String lastSeen = configManager.getConfiguration(BingoConfig.GROUP, LAST_SEEN_BROADCAST_KEY);
-		if (broadcast.updatedAt.equals(lastSeen))
-		{
-			return;
-		}
-
-		// The endpoint always returns the *current* message, not just unseen
-		// ones, so "haven't seen this timestamp before" is not on its own
-		// enough to mean "this is news". On a brand new install there is no
-		// stored timestamp at all, which used to make whatever broadcast
-		// happened to be current - possibly weeks old - get announced as if
-		// it had just been sent. The first observation only records where we
-		// came in; anything after it is genuinely new.
-		boolean firstObservation = lastSeen == null;
-		configManager.setConfiguration(BingoConfig.GROUP, LAST_SEEN_BROADCAST_KEY, broadcast.updatedAt);
-
-		// Tracked even while the toggle is off, and only *displayed* when it
-		// is on. Skipping the bookkeeping instead would mean turning the
-		// toggle back on later replays whatever stale message was current
-		// when it was turned off - the same bug in a different disguise.
-		if (firstObservation || !config.notifyBroadcasts())
-		{
-			return;
-		}
-		sendChatMessage(broadcast.message, config.clanMessageColor());
-	}
 }

@@ -40,18 +40,6 @@ public interface BingoConfig extends Config
 	String clanSection = "clan";
 
 	@ConfigItem(
-		keyName = "notifyLiveStreams",
-		name = "Notify when clan members go live",
-		description = "Post a chat message when a clan member goes live on Twitch.",
-		section = clanSection,
-		position = 3
-	)
-	default boolean notifyLiveStreams()
-	{
-		return true;
-	}
-
-	@ConfigItem(
 		keyName = "remindRuneProfileSync",
 		name = "Remind me to sync RuneProfile",
 		description = "Remind you once per session to sync RuneProfile if it hasn't been set up.",
@@ -59,18 +47,6 @@ public interface BingoConfig extends Config
 		position = 4
 	)
 	default boolean remindRuneProfileSync()
-	{
-		return true;
-	}
-
-	@ConfigItem(
-		keyName = "notifyBroadcasts",
-		name = "Clan broadcasts",
-		description = "Show messages sent by admins from the clan site.",
-		section = clanSection,
-		position = 5
-	)
-	default boolean notifyBroadcasts()
 	{
 		return true;
 	}
@@ -91,7 +67,7 @@ public interface BingoConfig extends Config
 	@ConfigItem(
 		keyName = "clanMessageColor",
 		name = "Clan notification color",
-		description = "Configure the color of broadcast, live-stream, and RuneProfile-sync notifications.",
+		description = "Configure the color of the RuneProfile-sync reminder and chat command usage messages.",
 		section = clanSection,
 		position = 7
 	)
@@ -110,7 +86,7 @@ public interface BingoConfig extends Config
 	@ConfigItem(
 		keyName = "showSidebar",
 		name = "Show bingo board",
-		description = "Show the bingo board tab in the sidebar. Turn off to hide the icon entirely.",
+		description = "Show the bingo board tab in the sidebar while you're on a bingo team. Turn off to hide the icon entirely.",
 		section = bingoSection,
 		position = 6
 	)

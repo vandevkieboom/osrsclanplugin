@@ -11,6 +11,22 @@ pasted into config (`BingoConfig.apiKey()`).
 
 ## Request volume: one poll per tick, only while logged in
 
+> **Superseded 2026-09-02** - the merge-three-requests-into-one fix below
+> shipped first and helped, but the database kept burning compute 24/7
+> regardless (Neon has no way to tell "cheap ping" traffic from anything
+> else - any request within its 5-minute auto-suspend window keeps the
+> compute awake, and broadcast/live-stream pings from the *entire* clan,
+> not just participants, were happening every 30-60s around the clock).
+> Rather than just widening cache windows, broadcast and live-stream
+> notifications were removed from the plugin entirely: `hasAnythingToPollFor()`
+> now checks only whether a plugin key is set, so nobody without one (i.e.
+> everyone except actual bingo participants) makes any periodic request at
+> all. See "Broadcast and live-stream notifications: removed entirely"
+> further down. The design below is kept for the parts that still apply
+> (merging into one request, not polling while logged out, `boardChangedAt`)
+> - just mentally cross out every mention of broadcast/live-stream as a
+> reason to poll.
+
 This plugin was, by a wide margin, the largest source of load on the clan
 site, and in late August 2026 it took the site down. Not through any bug -
 just by doing something small far too often, from far too many clients, at
@@ -134,6 +150,78 @@ specifically so that a single CDN cache entry can serve the whole clan;
 making it per-member is the same as having no cache at all. Anything that
 genuinely needs to be per-member belongs on `fetchBoard`, which is
 authenticated and rare.
+
+## Nav icon/sidebar panel: only shown while on a team
+
+**2026-09-02, follow-up to the removal above.** The sidebar panel used to
+appear for anyone with `showSidebar` on, regardless of team membership -
+which meant someone with a leftover plugin key but no team could still open
+it and see the clan-wide standings. That's not a privacy issue (that data was
+already fully public on the website), but `checkPanelOpened()` triggers a
+real, uncached board fetch the moment the panel opens while `bingoActive` is
+true - the expensive query, not the cheap shared ping - for someone who isn't
+even playing. Since the same information is available on the website, there
+was no reason to keep paying for that.
+
+`updateNavVisibility()` now gates the nav icon on `myTeamId != null` in
+addition to the existing `showSidebar` toggle, and is called from every place
+that could change either: `refreshMyTeam()`'s callback (including its
+empty-key early return), and the `showSidebar` config-change handler. The nav
+button is no longer added unconditionally in `startUp()` - team membership
+isn't known synchronously, so the icon simply doesn't appear until
+`refreshMyTeam()`'s async result resolves (a brief, harmless gap at login,
+not a bug).
+
+## Broadcast and live-stream notifications: removed entirely
+
+2026-09-02, on top of the merge-into-one-request fix above. Even after that
+fix, Neon compute usage stayed close to 24/7: its free-tier auto-suspend
+fires after 5 minutes of true inactivity, but the combined poll's edge cache
+window (30s default) meant *some* clan member's cache-miss reached the
+database roughly every 30-60 seconds, all day, forever - resetting that
+5-minute countdown before it could ever complete. The traffic keeping the
+database awake had nothing to do with bingo: it was every online install
+(several hundred people, whether or not they'd ever touched bingo) checking
+for a live-stream notice or an admin broadcast.
+
+Rather than raise the cache window (which only delays the problem and adds
+notification latency), both features were dropped:
+
+- `BingoPlugin`: `handleStreams()`, `handleBroadcast()`,
+  `previouslyLiveUsernames`, `LAST_SEEN_BROADCAST_KEY` all gone.
+  `hasAnythingToPollFor()` is now just `!config.apiKey().trim().isEmpty()` -
+  a plugin key is what a bingo participant has, so between events (or for
+  anyone who's never touched bingo) this plugin now makes **zero** periodic
+  requests, not just cheap ones.
+- `BingoConfig`: `notifyLiveStreams`/`notifyBroadcasts` toggles removed.
+  `clanMessageColor()` still exists (the RuneProfile-sync reminder and chat
+  command usage messages still use it) but its description no longer
+  mentions the removed features.
+- `BingoApiClient.PollResponse`: `broadcast`/`streams` fields and the
+  `Broadcast` class removed. `!live` is unaffected - it was always a
+  separate on-demand call (`fetchLiveStreams()` -> `GET /api/twitch-live`),
+  never fed by the periodic poll.
+- Site side (`osrsclan`): `api/plugin-poll.ts` no longer queries
+  `broadcast_message`/`broadcast_updated_at` or fetches Twitch streams at
+  all; `POST /api/admin/board?resource=broadcast` and
+  `GET /api/runeprofile-proxy?resource=broadcast` (the admin's send-a-message
+  endpoint and the pre-consolidation broadcast poll) are gone, along with the
+  Board Config panel's whole Broadcast tab. `db/schema.sql` drops the
+  `broadcast_message`/`broadcast_updated_at` columns. See that repo's own
+  CLAUDE.md for the full site-side change.
+- `pollSeconds` on the site is now tied directly to `bingo_active` (fast
+  while an event is on, slow otherwise) instead of "was a broadcast sent in
+  the last 15 minutes" - the old `needsFastPolling()` logic is gone along
+  with the feature it existed for. This also fixes a latent inconsistency
+  that was never actually noticed in production: the fast/slow cadence was
+  never really tied to whether bingo was active in the first place.
+
+**Don't reintroduce either feature without a fresh conversation about
+scope.** They were deliberately cut, not merely deferred - this was a direct
+tradeoff of "members lose two convenience notifications" against "the
+database can actually go to sleep when nobody's running a bingo," made with
+the user's explicit sign-off (small non-monetized clan project, doesn't want
+to pay to keep a background feature alive).
 
 ## Goal-progress tracking (XP/KC tiles) - reworked to hiscores-only
 
