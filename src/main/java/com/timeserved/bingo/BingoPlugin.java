@@ -672,17 +672,9 @@ public class BingoPlugin extends Plugin
 
 		bingoActive = result.bingoActive;
 
-		// Deliberately outside the bingoActive gate below: maybeRefreshMyTeam
-		// is already throttled to once per 30 minutes specifically so it's
-		// cheap enough to run for every member regardless of participation
-		// (see its own doc) - gating it on bingoActive too meant an
-		// already-running client had no way to ever notice being added to a
-		// team while no event was active, short of a restart or re-pasting
-		// the key. Board work still only makes sense while an event is on.
-		maybeRefreshMyTeam();
-
 		if (bingoActive)
 		{
+			maybeRefreshMyTeam();
 			if (shouldRefreshBoard(result.boardChangedAt))
 			{
 				refreshBoard(result.boardChangedAt);
