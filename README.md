@@ -5,10 +5,8 @@ A RuneLite plugin for the **Time Served** OSRS clan, built around
 chat commands and, during a bingo event, automatically screenshots and
 submits your drops as proof, no manual uploading needed.
 
-If you never set a plugin key, the plugin makes no background requests to the
-clan site at all - it only checks for a clan-wide admin broadcast once a
-minute, which costs nothing and can be turned off in settings if you'd rather
-not have it.
+If you never set a plugin key, the plugin makes no background requests at
+all.
 
 ## Setup
 
@@ -37,12 +35,6 @@ exposed, revoking it and generating a new one takes seconds.
 
 All of these can be turned off with the **"Clan chat commands"** toggle if
 you'd rather not have them.
-
-## Clan broadcasts
-
-Admins can post a message from the site that shows up as an in-game chat
-message for everyone, whether or not you're taking part in a bingo. Turn it
-off with the **"Clan broadcasts"** toggle if you'd rather not see them.
 
 ## During a bingo event
 
@@ -95,9 +87,6 @@ appears in-game.
   channels are currently live.
 - **`!event`**: sends nothing about you either, just asks for the current
   BOTW/SOTW's public standings.
-- **Clan broadcasts**: read-only, checked once a minute regardless of whether
-  a key is set. Nothing about you is sent; it just checks whether an admin
-  has posted a new message.
 
 Which item drops count toward which tiles is configured by clan admins on
 the site, not by you.

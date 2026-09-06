@@ -404,25 +404,31 @@ public class BingoPlugin extends Plugin
 	}
 
 	/**
-	 * The plugin's periodic workload, once a minute, only while actually
-	 * logged in.
+	 * The plugin's whole periodic workload: one request, once a minute, only
+	 * while actually logged in, and only for members who have a plugin key
+	 * set at all (see hasAnythingToPollFor).
 	 *
-	 * <p>Two very differently-shaped things happen here, and the distinction
-	 * matters. poll() is a real clan-site request and only runs for members
-	 * with a plugin key set (see hasAnythingToPollFor) - between events, or
-	 * for the several hundred members who just use the chat commands, that
-	 * half of the tick makes zero requests. fetchBroadcast() runs
-	 * unconditionally, for every install, key or no key - but it reads a
-	 * static file straight off Vercel Blob's CDN rather than calling a
-	 * clan-site endpoint (see BingoApiClient#BROADCAST_URL), so no Vercel
-	 * function ever runs for it. Both properties matter for the same reason:
-	 * this plugin once made three real requests a minute unconditionally for
-	 * every install regardless of bingo relevance - roughly 4,300 requests a
-	 * day per member doing nothing - which was enough on its own to exhaust
-	 * the site's hosting quotas and take the site down for everyone. Bingo
-	 * status is now asked only by participants; broadcast is asked by
-	 * everyone, same as before, but in a shape that costs nothing regardless
-	 * of how many people check it.
+	 * <p>This used to be three requests every minute - bingo status, clan
+	 * broadcast, live streams - fired unconditionally for as long as the
+	 * client was open, logged in or not, for every install regardless of
+	 * whether they had anything to do with bingo. That is roughly 4,300
+	 * requests per member per day doing nothing, and across the clan it was
+	 * enough to exhaust the site's hosting quotas outright, at which point
+	 * the site started failing for everyone. Broadcast and live-stream
+	 * notifications were removed entirely rather than just merged, so the
+	 * only thing left to poll for is bingo state, and only bingo participants
+	 * have any reason to ask for it - between events, or for the several
+	 * hundred members who just use the chat commands, this tick makes zero
+	 * requests at all.
+	 *
+	 * <p>Broadcast was briefly reintroduced over Vercel Blob (2026-09-07) on
+	 * the reasoning that reading a static file costs no function invocations
+	 * and never touches the database - both true - and removed again the same
+	 * day once it turned out every blob URL read still bills an Edge Request
+	 * whether it hits cache or not. Nothing about moving the *answer* off the
+	 * database changes how many times the *question* is asked, and at 100-500
+	 * members that question is the entire cost. Don't reintroduce any
+	 * unconditional periodic check here without doing that arithmetic first.
 	 *
 	 * <p>Nothing runs while logged out either: every result this could
 	 * deliver is a game chat message or a board the player is looking at
@@ -438,14 +444,6 @@ public class BingoPlugin extends Plugin
 	public void scheduledRefresh()
 	{
 		poll();
-		// Same login gate poll() applies internally - nothing this delivers
-		// can reach the player while logged out (it's a chat message), so
-		// checking at the login screen would just be wasted, even though the
-		// check itself costs nothing on the server side.
-		if (client.getGameState() == GameState.LOGGED_IN)
-		{
-			api.fetchBroadcast(this::handleBroadcast);
-		}
 	}
 
 	/*
@@ -671,67 +669,20 @@ public class BingoPlugin extends Plugin
 	}
 
 	/**
-	 * Whether this install has any reason to make a real clan-site request on
-	 * a timer. Live-stream notifications are gone entirely - the periodic
-	 * poll exists purely to deliver bingo state to actual participants, and a
-	 * plugin key is what a participant has. Nobody without one has anything
-	 * for this tick to tell them, so between events (or for the several
-	 * hundred members who just use the chat commands) this half of the tick
-	 * makes zero requests.
+	 * Whether this install has any reason to be talking to the site on a timer.
 	 *
-	 * <p>The clan broadcast is deliberately not part of this gate - see
-	 * scheduledRefresh - because it has to reach everyone, key or not, and it
-	 * does so without costing a clan-site request at all.
+	 * <p>Live-stream notifications and admin broadcasts are gone - the periodic
+	 * poll now exists purely to deliver bingo state to actual participants. A
+	 * plugin key is what a bingo participant has, so it is the only reason left
+	 * to poll at all: nobody without one has anything for this tick to tell
+	 * them, so between events (or for the several hundred members who just use
+	 * the chat commands) this install makes zero background requests. The chat
+	 * commands are unaffected either way: they are sent when typed, and never
+	 * poll.
 	 */
 	private boolean hasAnythingToPollFor()
 	{
 		return !config.apiKey().trim().isEmpty();
-	}
-
-	private static final String LAST_SEEN_BROADCAST_KEY = "lastSeenBroadcast";
-
-	/**
-	 * Announces a new clan broadcast in chat, once. See
-	 * BingoApiClient#BROADCAST_URL / osrsclan's api/_lib/broadcast.ts for why
-	 * this can run for every install, every minute, at essentially no cost -
-	 * unlike everything else on this tick, it never reaches the clan site's
-	 * own servers at all.
-	 */
-	private void handleBroadcast(BingoApiClient.Broadcast broadcast)
-	{
-		if (broadcast == null
-			|| broadcast.message == null
-			|| broadcast.message.isEmpty()
-			|| broadcast.updatedAt == null)
-		{
-			return;
-		}
-
-		String lastSeen = configManager.getConfiguration(BingoConfig.GROUP, LAST_SEEN_BROADCAST_KEY);
-		if (broadcast.updatedAt.equals(lastSeen))
-		{
-			return;
-		}
-
-		// The file always holds the *current* message, not just unseen ones,
-		// so "haven't seen this timestamp before" isn't on its own enough to
-		// mean "this is news". On a brand new install there is no stored
-		// timestamp at all, which would otherwise announce whatever broadcast
-		// happened to be current - possibly days old - as if it had just been
-		// sent. The first observation only records where we came in;
-		// anything after it is genuinely new.
-		boolean firstObservation = lastSeen == null;
-		configManager.setConfiguration(BingoConfig.GROUP, LAST_SEEN_BROADCAST_KEY, broadcast.updatedAt);
-
-		// Tracked even while the toggle is off, and only *displayed* when it
-		// is on - skipping the bookkeeping instead would mean turning the
-		// toggle back on later replays whatever stale message was current
-		// when it was turned off, the same bug in a different disguise.
-		if (firstObservation || !config.notifyBroadcasts())
-		{
-			return;
-		}
-		sendChatMessage(broadcast.message, config.clanMessageColor());
 	}
 
 	private void onPolled(BingoApiClient.PollResponse result)

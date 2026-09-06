@@ -272,23 +272,33 @@ not a bug).
 
 ## Broadcast and live-stream notifications: removed entirely
 
-> **Broadcast is back, 2026-09-07 - `!event` above shipped alongside it.**
-> `hasAnythingToPollFor`/`scheduledRefresh` no longer make "zero background
-> requests for non-participants" fully true: `BingoApiClient#fetchBroadcast`
-> now runs unconditionally, every minute, for every install. What makes that
-> safe is *what* it reads - a small public file on Vercel Blob's own CDN, not
-> a clan-site endpoint - so no Vercel function runs for it at all, and the
-> per-request cost that made the original version expensive (see the
-> uncorrected paragraph below) simply doesn't exist this time. `handleBroadcast`
-> is otherwise the same logic as before (persisted last-seen timestamp via
-> `configManager`, `notifyBroadcasts` toggle, `firstObservation` guard so a
-> fresh install doesn't announce a days-old message as new) - only how it's
-> fetched changed, not the announcing logic itself.
+> **Broadcast was reintroduced over Vercel Blob on 2026-09-07 and removed
+> again the same day. Read this before trying it a third time.**
 >
-> Live-stream notifications are still not back - see the correction just below
-> for why that one was always a different (Vercel-request-volume) problem than
-> broadcast's (Neon-compute) one, which is exactly why they didn't come back
-> together.
+> The idea was sound as far as it went: store the message as a small public
+> JSON file on Blob instead of a `board_config` column, and have every install
+> read that file directly rather than call a clan-site endpoint. That genuinely
+> does fix three meters - **zero** Neon compute (the database is never touched,
+> so it still suspends normally), zero function invocations, zero Active CPU.
+>
+> It does nothing for the fourth, which turned out to be the binding one.
+> Vercel's own docs: *"Each blob access by its URL counts as one Edge Request,
+> regardless if it's a MISS or HIT."* Cache hits avoid Simple Operations and
+> origin transfer, but not Edge Requests. So ~20 concurrent players checking
+> once a minute is ~864k Edge Requests/month for broadcast alone, which is the
+> same order as what the original polling version cost on that same meter.
+>
+> The transferable lesson, and the reason this is worth writing down: **moving
+> the *answer* off the database does not reduce how many times the *question*
+> is asked, and at 100-500 members the question is the cost.** Caching, Blob,
+> CDNs, 304s - none of them help a per-request meter. Only asking less often,
+> or not asking at all (on-demand chat commands, which is why `!live` and
+> `!event` are fine), or a real push channel the clan site cannot host on
+> serverless.
+>
+> Live-stream notifications were never brought back either - see the
+> correction just below for why that one was always a Vercel-request-volume
+> problem rather than the Neon-compute one broadcast was.
 
 > **Correction, 2026-09-06.** The Neon reasoning below is right about
 > *broadcast* and wrong about *live streams*. The site's `api/twitch-live.ts`
