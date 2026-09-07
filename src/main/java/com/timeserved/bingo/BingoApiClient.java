@@ -684,6 +684,18 @@ public class BingoApiClient
 		 *  can be more than one if a BOTW and SOTW happen to overlap, and is
 		 *  empty when status is "none". */
 		public List<EventCompetition> competitions;
+
+		/**
+		 * Only meaningful when {@link #status} is "none" - lets !event tell
+		 * "nothing is happening at all" apart from "there's no public
+		 * SOTW/BOTW, but a bingo is running". The clan's own bingo-xp-tracking
+		 * WOM competitions are filtered out of `competitions` before this
+		 * response is built (they aren't real events, nobody is "competing" in
+		 * one), so without this field a bingo week would otherwise look
+		 * identical to a genuinely quiet one. Absent (defaults false) on every
+		 * other status, since it isn't needed there.
+		 */
+		public boolean bingoActive;
 	}
 
 	/**

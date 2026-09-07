@@ -1568,15 +1568,26 @@ public class BingoPlugin extends Plugin
 		return text.toString();
 	}
 
-	/** Top standings shown per competition before truncating - keeps a reply
-	 *  with several ongoing competitions from flooding chat. */
-	private static final int EVENT_TOP_N = 5;
+	/** Top standings shown per competition before truncating. Keeps a reply
+	 *  with several ongoing competitions from flooding chat, and - the more
+	 *  common reason this matters - keeps a single competition's line short
+	 *  enough to read at a glance: RSNs vary a lot in length, and five of them
+	 *  reliably wraps across two or three chat lines as one hard-to-parse
+	 *  block of names and numbers. */
+	private static final int EVENT_TOP_N = 3;
 
 	private String formatEventResult(BingoApiClient.EventSummaryResponse result, String targetName)
 	{
 		if ("none".equals(result.status) || result.competitions.isEmpty())
 		{
-			return "No BOTW/SOTW running right now.";
+			// A bingo's own WOM competition (created just to eyeball xp/kc, not
+			// a real event) is filtered out server-side before it ever reaches
+			// here - so without checking bingoActive separately, a bingo week
+			// would say exactly the same thing as a genuinely quiet one, which
+			// tells nobody a bingo is actually running.
+			return result.bingoActive
+				? "No BOTW/SOTW running right now, but a bingo is!"
+				: "No BOTW/SOTW running right now.";
 		}
 
 		boolean upcoming = "upcoming".equals(result.status);
@@ -1643,10 +1654,19 @@ public class BingoPlugin extends Plugin
 		{
 			if (i > 0)
 			{
-				text.append("  ");
+				// A clear separator between entries, not just a space - RuneLite
+				// wraps a message this long across two or three chat lines
+				// regardless, and without something to mark where one entry ends
+				// and the next begins ("1. Name 33  2. Other name 32") the wrap
+				// reads as one run-on wall of names and numbers.
+				text.append(" | ");
 			}
 			BingoApiClient.EventParticipation p = ranked.get(i);
 			String name = p.player != null ? p.player.displayName : "?";
+			// Unit repeated on every entry, deliberately, even though it costs
+			// a few extra characters: clan chat scrolls, so the header this
+			// entry depends on can easily no longer be visible by the time
+			// someone reads this line. Each entry stays meaningful on its own.
 			text.append(i + 1).append(". ").append(name).append(" ")
 				.append(formatNumber(p.progress.gained)).append(" ").append(comp.metricType);
 		}
