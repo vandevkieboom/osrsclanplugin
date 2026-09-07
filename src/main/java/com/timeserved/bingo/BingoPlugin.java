@@ -1639,7 +1639,7 @@ public class BingoPlugin extends Plugin
 			if (p.player != null && targetName.equalsIgnoreCase(p.player.displayName))
 			{
 				return targetName + ": " + formatNumber(p.progress.gained) + " " + comp.metricType
-					+ " gained in " + metric + " " + label + " (rank " + (i + 1) + " of " + ranked.size() + ")";
+					+ " gained in " + metric + " " + label + " (rank " + (i + 1) + ")";
 			}
 		}
 		return null;
