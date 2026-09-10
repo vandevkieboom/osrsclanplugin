@@ -134,8 +134,29 @@ public class BoardResponse
 		 * submitted again. Only meaningful for item tiles - xp/kc tiles have
 		 * no proofs at all.
 		 */
+		/**
+		 * The server's own "would I accept another proof for this tile"
+		 * verdict, or null talking to a site that predates it.
+		 *
+		 * <p>Boxed deliberately: a primitive would default to false against an
+		 * older server and silently switch auto-submission off entirely, which
+		 * is far worse than the problem this field exists to fix.
+		 */
+		public Boolean acceptsMoreProof;
+
 		public boolean needsMoreProof()
 		{
+			// The server's answer wins when it gives one. It counts PENDING
+			// proofs toward a tile's requirement, which the status below does
+			// not - so a tile at its limit awaiting review reads as "pending"
+			// here while the server refuses every further submission for it.
+			// That mismatch cost a real event a wasted screenshot, upload and
+			// crab dance per drop, plus a misleading "that tile is already
+			// complete" in chat each time.
+			if (acceptsMoreProof != null)
+			{
+				return acceptsMoreProof;
+			}
 			// Keyed off the server's own completion verdict rather than
 			// re-deriving one from counts. requiredCount is the flat
 			// "how many proofs" field, and it stops meaning anything the

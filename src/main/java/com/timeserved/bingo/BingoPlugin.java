@@ -248,6 +248,25 @@ public class BingoPlugin extends Plugin
 			registerCommands();
 		}
 
+		// Re-resolve the panel's UI delegates against whatever look-and-feel is
+		// actually installed now.
+		//
+		// BingoPanel is an @Inject field, so it is constructed when this plugin
+		// object is - which can land before the client has swapped in its own
+		// look-and-feel. Anything built in that window keeps the UI delegate it
+		// was given at construction (Swing's default Metal), and nothing calls
+		// updateUI() on it afterwards, so it renders with Metal's thick
+		// arrow-button scrollbar while every other panel in the sidebar has the
+		// client's thin flat one. Reported from a real client as the bingo
+		// board having "a weird, really thick, blue, window type scroll bar".
+		//
+		// Doing it here rather than in the constructor is the whole point:
+		// startUp() runs well after the client's UI is up. It is a no-op when
+		// the panel was already built under the right look-and-feel, and it
+		// only re-reads UI defaults - explicitly set colours, fonts and borders
+		// are component properties and survive it.
+		SwingUtilities.invokeLater(() -> SwingUtilities.updateComponentTreeUI(bingoPanel));
+
 		bingoNavButton = NavigationButton.builder()
 			.tooltip("Bingo")
 			.icon(buildNavIcon())
@@ -1056,6 +1075,21 @@ public class BingoPlugin extends Plugin
 		handleLoot(event.getItems());
 	}
 
+	/** One tile that a single loot event should submit a proof for. */
+	private static class PendingCapture
+	{
+		private final BoardResponse.Tile tile;
+		private final int itemId;
+		private final String itemName;
+
+		private PendingCapture(BoardResponse.Tile tile, int itemId, String itemName)
+		{
+			this.tile = tile;
+			this.itemId = itemId;
+			this.itemName = itemName;
+		}
+	}
+
 	private void handleLoot(Collection<ItemStack> items)
 	{
 		if (items == null || tilesByItemId.isEmpty() || config.apiKey().trim().isEmpty())
@@ -1063,6 +1097,20 @@ public class BingoPlugin extends Plugin
 			return;
 		}
 
+		// Every (tile, item) pair this one loot event satisfies is collected
+		// first, and the screenshot is taken ONCE for all of them below.
+		//
+		// It used to request a frame per tile, inside this loop. One item can
+		// legitimately belong to several tiles at once (a Bandos hilt counting
+		// toward both "any GWD unique" and "2 of 4 hilts", say), and in that
+		// case this fired drawManager.requestNextFrameListener twice within the
+		// same frame and encoded two identical screenshots of it. Reported from
+		// a live event as "the item stops submitting for the other tile" - so
+		// whether or not RuneLite delivers every listener registered against
+		// one frame, relying on it was never worth it when the frame is
+		// identical for all of them anyway. One capture, one encode, N
+		// submissions.
+		List<PendingCapture> captures = new ArrayList<>();
 		for (ItemStack item : items)
 		{
 			List<BoardResponse.Tile> candidates = tilesByItemId.get(item.getId());
@@ -1077,16 +1125,25 @@ public class BingoPlugin extends Plugin
 				{
 					continue;
 				}
-				// Fired right here, at detection, rather than after the
-				// upload succeeds: it's purely cosmetic, so there's no
-				// reason to make it wait out a full screenshot-encode +
-				// network round trip (which is what made it feel delayed).
-				playDropEmote();
 				// Reading the item name needs the client thread, and we're on it
 				// here - resolve it now rather than inside the upload callback.
-				captureAndSubmit(tile, item.getId(), itemName(item.getId()));
+				captures.add(new PendingCapture(tile, item.getId(), itemName(item.getId())));
 			}
 		}
+
+		if (captures.isEmpty())
+		{
+			return;
+		}
+
+		// Fired right here, at detection, rather than after the upload
+		// succeeds: it's purely cosmetic, so there's no reason to make it wait
+		// out a full screenshot-encode + network round trip (which is what
+		// made it feel delayed). Once per loot event now rather than once per
+		// matching tile, so a drop counting for two tiles no longer dances
+		// twice.
+		playDropEmote();
+		captureAndSubmit(captures);
 	}
 
 	private String itemName(int itemId)
@@ -1102,7 +1159,7 @@ public class BingoPlugin extends Plugin
 		}
 	}
 
-	private void captureAndSubmit(BoardResponse.Tile tile, int itemId, String itemName)
+	private void captureAndSubmit(List<PendingCapture> captures)
 	{
 		// Whatever's already on screen (including the codeword overlay, if the player has it on)
 		// just gets picked up as part of this frame like any other overlay - see
@@ -1111,8 +1168,39 @@ public class BingoPlugin extends Plugin
 			// Copy the frame before leaving the render callback: the Image the
 			// client hands over is not ours to keep.
 			BufferedImage frame = ImageUtil.bufferedImageFromImage(image);
-			executor.execute(() -> encodeAndUpload(tile, itemId, itemName, frame));
+			executor.execute(() -> encodeAndUploadAll(captures, frame));
 		});
+	}
+
+	/**
+	 * Encodes the shared frame once, then submits it against every tile this
+	 * drop counted for. Encoding is the expensive half (a full game frame to
+	 * JPEG), and it produced identical bytes per tile before, so doing it once
+	 * is both cheaper and the thing that guarantees a multi-tile drop can't
+	 * half-submit.
+	 */
+	private void encodeAndUploadAll(List<PendingCapture> captures, BufferedImage frame)
+	{
+		byte[] image;
+		try
+		{
+			image = encodeProof(frame);
+		}
+		catch (IOException e)
+		{
+			log.warn("Failed to encode bingo screenshot", e);
+			for (PendingCapture capture : captures)
+			{
+				recentAttempts.remove(capture.tile.tileId);
+			}
+			notifyPlayer("Could not encode the screenshot for " + captures.get(0).itemName);
+			return;
+		}
+
+		for (PendingCapture capture : captures)
+		{
+			upload(capture, image);
+		}
 	}
 
 	/**
@@ -1131,40 +1219,51 @@ public class BingoPlugin extends Plugin
 	private static final float PROOF_JPEG_QUALITY = 0.85f;
 
 	/**
-	 * Encodes the captured frame and sends it as proof.
+	 * Server rejections that mean "there was nothing to do here", as opposed to
+	 * something the player can act on.
 	 *
-	 * <p>These were lossless PNGs of a full game frame, which is close to the
-	 * worst case for PNG: it compresses flat colour well and detailed,
-	 * dithered, noisy 3D output badly, so real proofs were landing around
-	 * 800KB-1MB each. That is charged twice over - once against the site's
-	 * blob storage quota, which every proof occupies until the board is
-	 * reset, and again against its transfer quota every single time somebody
-	 * opens a tile to look at the screenshots. JPEG at high quality is
-	 * roughly three to four times smaller on this kind of image with no
-	 * meaningful loss of legibility, which is the only thing a proof has to
-	 * be.
+	 * <p>The plugin deliberately tries a tile whenever the server hasn't marked
+	 * it <em>approved</em> yet, but the server counts <em>pending</em> proofs
+	 * toward a tile's requirement too - so any tile sitting at its limit with
+	 * unreviewed proofs on it gets attempted on every matching drop and refused
+	 * every time. That is correct on both sides and must stay that way (the
+	 * plugin can't know how an admin will rule on a pending proof), but it used
+	 * to put "not submitted - That tile is already complete" in the player's
+	 * chat on every single drop. Reported from a live event as the plugin
+	 * having broken, which is exactly the wrong impression: nothing was wrong,
+	 * there was simply nothing left to submit.
 	 */
-	private void encodeAndUpload(BoardResponse.Tile tile, int itemId, String itemName, BufferedImage frame)
+	private static boolean isExpectedRejection(String error)
 	{
-		byte[] image;
-		try
+		if (error == null)
 		{
-			image = encodeProof(frame);
+			return false;
 		}
-		catch (IOException e)
-		{
-			log.warn("Failed to encode bingo screenshot", e);
-			recentAttempts.remove(tile.tileId);
-			notifyPlayer("Could not encode the screenshot for " + itemName);
-			return;
-		}
+		String lower = error.toLowerCase(Locale.ROOT);
+		return lower.contains("already complete")
+			|| lower.contains("already been submitted")
+			|| lower.contains("already at required amount");
+	}
 
+	/**
+	 * Sends one already-encoded proof for one tile.
+	 *
+	 * <p>Proofs are JPEG rather than lossless PNG: a full game frame is close
+	 * to PNG's worst case (it compresses flat colour well and dithered, noisy
+	 * 3D output badly), so real proofs were landing around 800KB-1MB each.
+	 * That is charged twice over - once against the site's blob storage quota,
+	 * which every proof occupies until the board is reset, and again against
+	 * its transfer quota every single time somebody opens a tile to look.
+	 */
+	private void upload(PendingCapture capture, byte[] image)
+	{
+		BoardResponse.Tile tile = capture.tile;
 		api.submitProof(
 			config.apiKey().trim(),
 			tile.tileId,
-			itemId,
+			capture.itemId,
 			image,
-			() -> onSubmitted(itemName, tile.name),
+			() -> onSubmitted(capture.itemName, tile.name),
 			error -> {
 				// A transport failure is worth retrying - both immediately on
 				// the next matching drop (the dedupe window, not "forever", is
@@ -1174,13 +1273,19 @@ public class BingoPlugin extends Plugin
 				if ("Could not reach the clan site".equals(error))
 				{
 					recentAttempts.remove(tile.tileId);
-					PendingSubmissionStore.PendingItem item = pendingStore.saveProof(tile.tileId, tile.name, itemId, itemName, image);
+					PendingSubmissionStore.PendingItem item = pendingStore.saveProof(
+						tile.tileId, tile.name, capture.itemId, capture.itemName, image);
 					if (item != null)
 					{
 						enqueueRetry(item);
 					}
 				}
-				notifyPlayer(itemName + " not submitted - " + error);
+				if (isExpectedRejection(error))
+				{
+					log.debug("Bingo proof for {} not needed: {}", tile.name, error);
+					return;
+				}
+				notifyPlayer(capture.itemName + " not submitted - " + error);
 			});
 	}
 
