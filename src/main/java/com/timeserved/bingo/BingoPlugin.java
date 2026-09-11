@@ -1561,8 +1561,67 @@ public class BingoPlugin extends Plugin
 		String targetName = typed.isEmpty() ? null : Text.sanitize(typed);
 
 		api.fetchEventSummary(
-			result -> setChatReply(chatMessage, formatEventResult(result, targetName)),
+			result -> {
+				boolean noRealEvent = "none".equals(result.status) || result.competitions.isEmpty();
+				String eventPart = formatEventResult(result, targetName);
+				if (!result.bingoActive)
+				{
+					setChatReply(chatMessage, eventPart);
+					return;
+				}
+				// Shown whenever bingo is active - a real SOTW/BOTW running at
+				// the same time must not suppress this, any more than the
+				// bingo's own xp/kc tracking competition should (see
+				// isRealCompetition server-side). Not `fresh`: this is the
+				// same shared, cached board every online plugin's regular
+				// poll already hits, so reusing that cache costs nothing
+				// beyond the one request this command already makes.
+				api.fetchBoard(false,
+					board -> {
+						String standings = formatBingoStandings(board);
+						// No real event running means there is nothing for
+						// standings to be "in addition to" - the "no
+						// BOTW/SOTW" line would just be noise in front of the
+						// only thing actually worth saying.
+						String combined = noRealEvent ? standings : eventPart + " | " + standings;
+						setChatReply(chatMessage, combined);
+					},
+					error -> setChatReply(chatMessage, eventPart));
+			},
 			error -> setChatReply(chatMessage, error));
+	}
+
+	/** "Bingo: Team A 18/25 (72%) | Team B 14/25 (56%) | Team C 9/25 (36%)" -
+	 *  top 3 only, same reasoning and same cap (EVENT_TOP_N) as a
+	 *  competition's standings: a long line of team names wraps across
+	 *  several chat lines and stops being readable at a glance. */
+	private String formatBingoStandings(BoardResponse board)
+	{
+		List<BoardResponse.Team> teams = new ArrayList<>(board.getTeams());
+		if (teams.isEmpty())
+		{
+			return "Bingo: no teams yet.";
+		}
+		teams.sort((a, b) -> Integer.compare(b.pct, a.pct));
+
+		StringBuilder text = new StringBuilder("Bingo:");
+		int shown = 0;
+		for (BoardResponse.Team team : teams)
+		{
+			if (shown >= EVENT_TOP_N)
+			{
+				break;
+			}
+			if (shown > 0)
+			{
+				text.append(" |");
+			}
+			text.append(" ").append(team.name).append(" ")
+				.append(team.completeCount).append("/").append(team.totalTiles)
+				.append(" (").append(team.pct).append("%)");
+			shown++;
+		}
+		return text.toString();
 	}
 
 	/** The bit after the command word, or the sender's own name if nothing follows it. */
@@ -1685,14 +1744,11 @@ public class BingoPlugin extends Plugin
 	{
 		if ("none".equals(result.status) || result.competitions.isEmpty())
 		{
-			// A bingo's own WOM competition (created just to eyeball xp/kc, not
-			// a real event) is filtered out server-side before it ever reaches
-			// here - so without checking bingoActive separately, a bingo week
-			// would say exactly the same thing as a genuinely quiet one, which
-			// tells nobody a bingo is actually running.
-			return result.bingoActive
-				? "No BOTW/SOTW running right now, but a bingo is!"
-				: "No BOTW/SOTW running right now.";
+			// Used to branch on result.bingoActive here to say "...but a bingo
+			// is!" - now redundant. onEventCommand appends real standings
+			// whenever bingo is active, which already says so on its own far
+			// more usefully than this placeholder line ever did.
+			return "No BOTW/SOTW running right now.";
 		}
 
 		boolean upcoming = "upcoming".equals(result.status);
